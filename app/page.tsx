@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import type { Todo, Priority, RecurrencePattern, Subtask, Tag, TodoWithTags } from '@/lib/db'
+import type { Todo, Priority, RecurrencePattern, Subtask, Tag, TodoWithTags, Template, SubtaskTemplate } from '@/lib/db'
 import {
   getSingaporeNow,
   formatRelativeDueDate,
@@ -556,6 +556,761 @@ function TagManager({ tags, onRename, onRecolor, onDelete, onClose }: TagManager
 }
 
 // ---------------------------------------------------------------------------
+// SaveAsTemplateModal — PRP 07 §5.2
+// Opens from a todo row's action menu. Saves the todo as a reusable template.
+// ---------------------------------------------------------------------------
+function SaveAsTemplateModal({
+  todo,
+  onClose,
+  onSaved,
+  showError,
+}: {
+  todo: TodoWithTags
+  onClose: () => void
+  onSaved: () => void
+  showError: (msg: string) => void
+}) {
+  const [name, setName] = useState(todo.title)
+  const [category, setCategory] = useState('')
+  const [dueOffsetDays, setDueOffsetDays] = useState('')
+  const [subtasks, setSubtasks] = useState<SubtaskTemplate[]>([])
+  const [loadingSubtasks, setLoadingSubtasks] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+
+  // Load subtasks for the todo
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetch(`/api/todos/${todo.id}/subtasks`)
+        if (!res.ok) return
+        const json = await res.json()
+        const loaded: Subtask[] = json.data ?? []
+        setSubtasks(loaded.map((s) => ({ title: s.title, position: s.position })))
+      } catch { /* non-fatal */ } finally {
+        setLoadingSubtasks(false)
+      }
+    }
+    load()
+  }, [todo.id])
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault()
+    const trimmedName = name.trim()
+    if (!trimmedName) { setFormError('Template name is required'); return }
+    if (trimmedName.length > 200) { setFormError('Name must be 200 characters or less'); return }
+    const categoryTrimmed = category.trim() || null
+    if (categoryTrimmed && categoryTrimmed.length > 50) { setFormError('Category must be 50 characters or less'); return }
+
+    let offsetDays: number | null = null
+    if (dueOffsetDays.trim()) {
+      const n = parseInt(dueOffsetDays, 10)
+      if (isNaN(n) || n < 0 || n > 3650) { setFormError('Due offset must be 0–3650 days'); return }
+      offsetDays = n
+    }
+
+    setIsSaving(true)
+    setFormError(null)
+    try {
+      const res = await fetch('/api/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: trimmedName,
+          category: categoryTrimmed,
+          priority: todo.priority,
+          recurrence: todo.recurrence ?? null,
+          reminder_minutes: todo.reminder_minutes ?? null,
+          due_offset_days: offsetDays,
+          subtasks,
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error?.message ?? 'Failed to save template')
+      onSaved()
+      onClose()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save template'
+      setFormError(msg)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="save-template-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6 overflow-y-auto max-h-[90vh]">
+        <h2 id="save-template-title" className="text-lg font-semibold mb-4">Save as Template</h2>
+        <form onSubmit={handleSave} className="flex flex-col gap-3">
+          <div>
+            <label htmlFor="tmpl-name" className="block text-sm font-medium mb-1">
+              Template Name <span aria-hidden="true">*</span>
+            </label>
+            <input
+              id="tmpl-name"
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={200}
+              required
+              className="w-full border rounded px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label htmlFor="tmpl-category" className="block text-sm font-medium mb-1">Category</label>
+            <input
+              id="tmpl-category"
+              type="text"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              maxLength={50}
+              placeholder="e.g. Work, Personal"
+              className="w-full border rounded px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label htmlFor="tmpl-offset" className="block text-sm font-medium mb-1">
+              Due Date Offset (days from creation)
+            </label>
+            <input
+              id="tmpl-offset"
+              type="number"
+              value={dueOffsetDays}
+              onChange={(e) => setDueOffsetDays(e.target.value)}
+              min={0}
+              max={3650}
+              placeholder="Leave blank for no due date"
+              className="w-full border rounded px-3 py-2 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          {loadingSubtasks ? (
+            <p className="text-xs text-gray-400">Loading subtasks…</p>
+          ) : subtasks.length > 0 ? (
+            <div>
+              <p className="text-sm font-medium mb-1">Subtasks ({subtasks.length})</p>
+              <ul className="space-y-1">
+                {subtasks.map((s, i) => (
+                  <li key={i} className="text-xs text-gray-600 dark:text-gray-300 flex items-center gap-1">
+                    <span className="w-1 h-1 rounded-full bg-gray-400 flex-shrink-0" />
+                    {s.title}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {formError && <p role="alert" className="text-xs text-red-600">{formError}</p>}
+          <div className="flex gap-3 justify-end mt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isSaving || !name.trim()}
+              className="px-4 py-2 text-sm rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium transition-colors"
+            >
+              {isSaving ? 'Saving…' : 'Save Template'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// TemplatePickerModal — PRP 07 §5.1
+// Browse, filter by category, and create a todo from a template.
+// ---------------------------------------------------------------------------
+function TemplatePickerModal({
+  templates,
+  onClose,
+  onCreated,
+  showError,
+  onManage,
+}: {
+  templates: Template[]
+  onClose: () => void
+  onCreated: (todo: TodoWithTags) => void
+  showError: (msg: string) => void
+  onManage: () => void
+}) {
+  const [search, setSearch] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState<string>('all')
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [isCreating, setIsCreating] = useState(false)
+
+  const categories = useMemo(() => {
+    const cats = new Set(templates.map((t) => t.category).filter(Boolean) as string[])
+    return Array.from(cats).sort((a, b) => a.localeCompare(b))
+  }, [templates])
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return templates.filter((t) => {
+      const matchesSearch = !q || t.name.toLowerCase().includes(q)
+      const matchesCategory = categoryFilter === 'all' || t.category === categoryFilter
+      return matchesSearch && matchesCategory
+    })
+  }, [templates, search, categoryFilter])
+
+  const selectedTemplate = templates.find((t) => t.id === selectedId) ?? null
+
+  async function handleCreate() {
+    if (!selectedId) return
+    setIsCreating(true)
+    try {
+      const res = await fetch(`/api/templates/${selectedId}/use`, { method: 'POST' })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error?.message ?? 'Failed to create todo')
+      onCreated({ ...json.data, tags: [] })
+      onClose()
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Failed to create todo from template')
+    } finally {
+      setIsCreating(false)
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="template-picker-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-lg w-full p-6 flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between mb-4">
+          <h2 id="template-picker-title" className="text-lg font-semibold">Use Template</h2>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onManage}
+              className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              Manage Templates
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close template picker"
+              className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xl leading-none ml-2"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+        <div className="flex gap-2 mb-3">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search templates…"
+            aria-label="Search templates"
+            className="flex-1 border rounded px-3 py-1.5 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          {categories.length > 0 && (
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              aria-label="Filter by category"
+              className="border rounded px-2 py-1.5 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="all">All Categories</option>
+              {categories.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {filtered.length === 0 ? (
+          <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+            {templates.length === 0 ? 'No templates yet. Save a todo as a template to get started.' : 'No templates match the current filter.'}
+          </p>
+        ) : (
+          <ul className="overflow-y-auto flex-1 space-y-1 mb-3">
+            {filtered.map((t) => {
+              const subtaskCount = (() => {
+                try { return (JSON.parse(t.subtasks) as unknown[]).length } catch { return 0 }
+              })()
+              const isSelected = t.id === selectedId
+              return (
+                <li key={t.id}>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(isSelected ? null : t.id)}
+                    className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
+                      isSelected
+                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30 dark:border-blue-400'
+                        : 'border-gray-200 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-medium truncate">{t.name}</span>
+                      {t.category && (
+                        <span className="text-xs px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 flex-shrink-0">
+                          {t.category}
+                        </span>
+                      )}
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full flex-shrink-0 ${PRIORITY_CLASSES[t.priority]}`}>
+                        {capitalize(t.priority)}
+                      </span>
+                      {subtaskCount > 0 && (
+                        <span className="text-xs text-gray-400 flex-shrink-0">
+                          {subtaskCount} subtask{subtaskCount !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                      {t.due_offset_days !== null && (
+                        <span className="text-xs text-gray-400 flex-shrink-0">
+                          +{t.due_offset_days}d
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
+        {selectedTemplate && (
+          <div className="border-t border-gray-200 dark:border-gray-700 pt-3 mb-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+            <p><strong>Priority:</strong> {capitalize(selectedTemplate.priority)}</p>
+            {selectedTemplate.recurrence && <p><strong>Repeats:</strong> {capitalize(selectedTemplate.recurrence)}</p>}
+            {selectedTemplate.due_offset_days !== null && (
+              <p><strong>Due:</strong> {selectedTemplate.due_offset_days} day{selectedTemplate.due_offset_days !== 1 ? 's' : ''} after creation</p>
+            )}
+          </div>
+        )}
+
+        <div className="flex gap-3 justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 text-sm rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleCreate}
+            disabled={!selectedId || isCreating}
+            className="px-4 py-2 text-sm rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium transition-colors"
+          >
+            {isCreating ? 'Creating…' : 'Create from Template'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// ManageTemplatesModal — PRP 07 §5.3
+// Lists all templates with edit and delete actions.
+// ---------------------------------------------------------------------------
+function ManageTemplatesModal({
+  templates,
+  onClose,
+  onTemplatesChanged,
+}: {
+  templates: Template[]
+  onClose: () => void
+  onTemplatesChanged: () => void
+}) {
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editCategory, setEditCategory] = useState('')
+  const [editError, setEditError] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
+
+  const deletingTemplate = templates.find((t) => t.id === deletingId)
+
+  async function submitEdit(id: number) {
+    const name = editName.trim()
+    if (!name) { setEditError('Name is required'); return }
+    if (name.length > 200) { setEditError('Max 200 characters'); return }
+    const cat = editCategory.trim() || null
+    if (cat && cat.length > 50) { setEditError('Category max 50 characters'); return }
+    setIsSaving(true)
+    setEditError(null)
+    try {
+      const res = await fetch(`/api/templates/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, category: cat }),
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error?.message ?? 'Failed to update template')
+      onTemplatesChanged()
+      setEditingId(null)
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Failed to update template')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  async function confirmDelete(id: number) {
+    try {
+      const res = await fetch(`/api/templates/${id}`, { method: 'DELETE' })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error?.message ?? 'Failed to delete template')
+      onTemplatesChanged()
+      setDeletingId(null)
+    } catch { /* handled by state */ }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="manage-templates-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6 max-h-[80vh] flex flex-col">
+        <div className="flex items-center justify-between mb-4">
+          <h2 id="manage-templates-title" className="text-lg font-semibold">Manage Templates</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close template manager"
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+
+        {templates.length === 0 ? (
+          <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+            No templates yet. Save a todo as a template to get started.
+          </p>
+        ) : (
+          <ul className="space-y-2 overflow-y-auto flex-1">
+            {templates.map((t) => {
+              const subtaskCount = (() => {
+                try { return (JSON.parse(t.subtasks) as unknown[]).length } catch { return 0 }
+              })()
+              return (
+                <li
+                  key={t.id}
+                  className="py-2 border-b border-gray-100 dark:border-gray-700 last:border-0"
+                >
+                  {editingId === t.id ? (
+                    <div className="flex flex-col gap-1.5">
+                      <input
+                        type="text"
+                        value={editName}
+                        onChange={(e) => { setEditName(e.target.value); setEditError(null) }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') { e.preventDefault(); submitEdit(t.id) }
+                          if (e.key === 'Escape') setEditingId(null)
+                        }}
+                        maxLength={200}
+                        autoFocus
+                        aria-label="Template name"
+                        placeholder="Template name"
+                        className="border rounded px-2 py-1 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                      <input
+                        type="text"
+                        value={editCategory}
+                        onChange={(e) => { setEditCategory(e.target.value); setEditError(null) }}
+                        maxLength={50}
+                        aria-label="Category"
+                        placeholder="Category (optional)"
+                        className="border rounded px-2 py-1 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                      {editError && <p className="text-xs text-red-600">{editError}</p>}
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => submitEdit(t.id)}
+                          disabled={isSaving}
+                          className="px-3 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setEditingId(null); setEditError(null) }}
+                          className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 min-w-0">
+                        <span
+                          className="text-sm font-medium truncate block cursor-pointer hover:text-blue-600 dark:hover:text-blue-400"
+                          onClick={() => { setEditingId(t.id); setEditName(t.name); setEditCategory(t.category ?? ''); setEditError(null) }}
+                          title="Click to edit"
+                        >
+                          {t.name}
+                        </span>
+                        <div className="flex gap-1.5 mt-0.5 flex-wrap">
+                          {t.category && (
+                            <span className="text-xs px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
+                              {t.category}
+                            </span>
+                          )}
+                          <span className="text-xs text-gray-400">{subtaskCount} subtask{subtaskCount !== 1 ? 's' : ''}</span>
+                        </div>
+                      </div>
+                      <div className="flex gap-1 flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => { setEditingId(t.id); setEditName(t.name); setEditCategory(t.category ?? ''); setEditError(null) }}
+                          aria-label={`Edit template ${t.name}`}
+                          className="text-xs text-gray-400 hover:text-blue-600 transition-colors px-1.5 py-0.5 rounded hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeletingId(t.id)}
+                          aria-label={`Delete template ${t.name}`}
+                          className="text-xs text-gray-400 hover:text-red-600 transition-colors px-1"
+                        >
+                          🗑
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+
+      {deletingTemplate && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="tmpl-delete-title"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+        >
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6">
+            <h3 id="tmpl-delete-title" className="text-base font-semibold mb-2">
+              Delete template &quot;{deletingTemplate.name}&quot;?
+            </h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+              This will permanently delete the template. Todos created from it will not be affected.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => setDeletingId(null)}
+                className="px-4 py-2 text-sm rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => confirmDelete(deletingTemplate.id)}
+                className="px-4 py-2 text-sm rounded bg-red-600 hover:bg-red-700 text-white font-medium transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// ImportModal — PRP 09 §5 (Import feature)
+// ---------------------------------------------------------------------------
+interface ImportPreview {
+  todos: number
+  subtasks: number
+  tags: number
+}
+
+function ImportModal({
+  onClose,
+  onImported,
+  showError,
+}: {
+  onClose: () => void
+  onImported: () => void
+  showError: (msg: string) => void
+}) {
+  const [fileContent, setFileContent] = useState<string | null>(null)
+  const [preview, setPreview] = useState<ImportPreview | null>(null)
+  const [parseError, setParseError] = useState<string | null>(null)
+  const [validationErrors, setValidationErrors] = useState<string[]>([])
+  const [isImporting, setIsImporting] = useState(false)
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setParseError(null)
+    setValidationErrors([])
+    setPreview(null)
+    setFileContent(null)
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string
+      try {
+        const parsed = JSON.parse(text)
+        if (
+          typeof parsed === 'object' &&
+          parsed !== null &&
+          Array.isArray(parsed.todos) &&
+          Array.isArray(parsed.subtasks) &&
+          Array.isArray(parsed.tags)
+        ) {
+          setPreview({
+            todos: (parsed.todos as unknown[]).length,
+            subtasks: (parsed.subtasks as unknown[]).length,
+            tags: (parsed.tags as unknown[]).length,
+          })
+          setFileContent(text)
+        } else {
+          setParseError('File is missing required fields (todos, subtasks, tags).')
+        }
+      } catch {
+        setParseError('Invalid JSON file. Please select a valid export file.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  async function handleImport() {
+    if (!fileContent) return
+    setIsImporting(true)
+    setValidationErrors([])
+    try {
+      const res = await fetch('/api/todos/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: fileContent,
+      })
+      const json = await res.json()
+      if (!res.ok) {
+        if (res.status === 400 && json.error?.errors) {
+          setValidationErrors(json.error.errors as string[])
+        } else {
+          showError(json.error?.message ?? 'Import failed')
+          onClose()
+        }
+        return
+      }
+      const { imported } = json as { imported: ImportPreview }
+      showError(`Imported ${imported.todos} todos, ${imported.subtasks} subtasks, ${imported.tags} tags.`)
+      onImported()
+      onClose()
+    } catch {
+      showError('Import failed. Please try again.')
+      onClose()
+    } finally {
+      setIsImporting(false)
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="import-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 id="import-modal-title" className="text-lg font-semibold">Import Todos</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close import modal"
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <div>
+            <label htmlFor="import-file" className="block text-sm font-medium mb-1">
+              Select export file (.json)
+            </label>
+            <input
+              id="import-file"
+              type="file"
+              accept=".json"
+              onChange={handleFileChange}
+              className="block w-full text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 dark:file:bg-blue-900/30 dark:file:text-blue-300"
+            />
+          </div>
+
+          {parseError && (
+            <p role="alert" className="text-sm text-red-600 dark:text-red-400">{parseError}</p>
+          )}
+
+          {preview && (
+            <div className="rounded-lg bg-gray-50 dark:bg-gray-700/50 px-4 py-3 text-sm">
+              <p className="font-medium mb-1 text-gray-700 dark:text-gray-200">Preview</p>
+              <ul className="space-y-0.5 text-gray-600 dark:text-gray-300">
+                <li>{preview.todos} todo{preview.todos !== 1 ? 's' : ''}</li>
+                <li>{preview.subtasks} subtask{preview.subtasks !== 1 ? 's' : ''}</li>
+                <li>{preview.tags} tag{preview.tags !== 1 ? 's' : ''}</li>
+              </ul>
+            </div>
+          )}
+
+          {validationErrors.length > 0 && (
+            <div role="alert" className="rounded-lg bg-red-50 dark:bg-red-900/20 px-4 py-3">
+              <p className="text-sm font-medium text-red-700 dark:text-red-400 mb-1">
+                Validation errors:
+              </p>
+              <ul className="list-disc list-inside space-y-0.5">
+                {validationErrors.map((e, i) => (
+                  <li key={i} className="text-xs text-red-600 dark:text-red-400">{e}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="flex gap-3 justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleImport}
+              disabled={!fileContent || isImporting}
+              className="px-4 py-2 text-sm rounded bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium transition-colors"
+            >
+              {isImporting ? 'Importing…' : 'Import'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // PriorityBadge — PRP 02 §5.1
 // Renders text label + aria-label so color is never the only signal (WCAG 1.4.1)
 // ---------------------------------------------------------------------------
@@ -990,11 +1745,13 @@ function TodoRow({
   onToggle,
   onEdit,
   onDelete,
+  onSaveAsTemplate,
 }: {
   todo: TodoWithTags
   onToggle: (todo: TodoWithTags) => void
   onEdit: (todo: TodoWithTags) => void
   onDelete: (todo: TodoWithTags) => void
+  onSaveAsTemplate: (todo: TodoWithTags) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const [subtasks, setSubtasks] = useState<Subtask[]>([])
@@ -1139,6 +1896,14 @@ function TodoRow({
           </button>
           <button
             type="button"
+            onClick={() => onSaveAsTemplate(todo)}
+            aria-label={`Save "${todo.title}" as template`}
+            className="px-2 py-1 text-xs rounded text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors"
+          >
+            Template
+          </button>
+          <button
+            type="button"
             onClick={() => onDelete(todo)}
             aria-label={`Delete "${todo.title}"`}
             className="px-2 py-1 text-xs rounded text-gray-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
@@ -1208,6 +1973,7 @@ function TodoSection({
   onToggle,
   onEdit,
   onDelete,
+  onSaveAsTemplate,
 }: {
   title: string
   todos: TodoWithTags[]
@@ -1215,6 +1981,7 @@ function TodoSection({
   onToggle: (todo: TodoWithTags) => void
   onEdit: (todo: TodoWithTags) => void
   onDelete: (todo: TodoWithTags) => void
+  onSaveAsTemplate: (todo: TodoWithTags) => void
 }) {
   if (todos.length === 0) return null // Empty sections are hidden per PRP 01 §3.2
 
@@ -1234,6 +2001,7 @@ function TodoSection({
             onToggle={onToggle}
             onEdit={onEdit}
             onDelete={onDelete}
+            onSaveAsTemplate={onSaveAsTemplate}
           />
         ))}
       </ul>
@@ -1260,6 +2028,16 @@ export default function HomePage() {
   const [activeTagIds, setActiveTagIds] = useState<number[]>([])
   const [showTagManager, setShowTagManager] = useState(false)
   const [newTags, setNewTags] = useState<Tag[]>([]) // tags selected in create form
+
+  // PRP 07 — template state
+  const [templates, setTemplates] = useState<Template[]>([])
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false)
+  const [showManageTemplates, setShowManageTemplates] = useState(false)
+  const [savingAsTemplateFor, setSavingAsTemplateFor] = useState<TodoWithTags | null>(null)
+
+  // PRP 09 — export/import state
+  const [isExporting, setIsExporting] = useState(false)
+  const [showImportModal, setShowImportModal] = useState(false)
 
   // Create form state
   const [newTitle, setNewTitle] = useState('')
@@ -1290,6 +2068,7 @@ export default function HomePage() {
   useEffect(() => {
     fetchTodos()
     fetchAllTags()
+    fetchTemplates()
   }, [])
 
   // Silently drop any active tag filter IDs that no longer exist
@@ -1324,6 +2103,15 @@ export default function HomePage() {
       if (!res.ok) return
       const json = await res.json()
       setAllTags(json.data ?? [])
+    } catch { /* non-fatal */ }
+  }
+
+  async function fetchTemplates() {
+    try {
+      const res = await fetch('/api/templates')
+      if (!res.ok) return
+      const json = await res.json()
+      setTemplates(json.data ?? [])
     } catch { /* non-fatal */ }
   }
 
@@ -1532,6 +2320,31 @@ export default function HomePage() {
     router.push('/login')
   }
 
+  // PRP 09 — export all todos as a JSON file download
+  async function handleExport() {
+    setIsExporting(true)
+    try {
+      const res = await fetch('/api/todos/export')
+      if (!res.ok) throw new Error('Export failed')
+      const blob = await res.blob()
+      const contentDisposition = res.headers.get('content-disposition') ?? ''
+      const match = contentDisposition.match(/filename="([^"]+)"/)
+      const filename = match ? match[1] : 'todos-export.json'
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      showError('Export failed. Please try again.')
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
   return (
     <main className="min-h-screen p-4 max-w-2xl mx-auto">
       {/* Header */}
@@ -1566,6 +2379,38 @@ export default function HomePage() {
           >
             Manage Tags
           </button>
+          {/* PRP 07 — Use Template button */}
+          <button
+            type="button"
+            onClick={() => setShowTemplatePicker(true)}
+            className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          >
+            Use Template
+          </button>
+          {/* PRP 09 — Export button */}
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={isExporting}
+            className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors disabled:opacity-50"
+          >
+            {isExporting ? 'Exporting…' : 'Export'}
+          </button>
+          {/* PRP 09 — Import button */}
+          <button
+            type="button"
+            onClick={() => setShowImportModal(true)}
+            className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          >
+            Import
+          </button>
+          {/* PRP 10 — Calendar link */}
+          <a
+            href="/calendar"
+            className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          >
+            Calendar
+          </a>
         </div>
       </div>
 
@@ -1732,6 +2577,7 @@ export default function HomePage() {
             onToggle={handleToggle}
             onEdit={setEditingTodo}
             onDelete={setDeletingTodo}
+            onSaveAsTemplate={setSavingAsTemplateFor}
           />
           {/* Active */}
           <TodoSection
@@ -1740,6 +2586,7 @@ export default function HomePage() {
             onToggle={handleToggle}
             onEdit={setEditingTodo}
             onDelete={setDeletingTodo}
+            onSaveAsTemplate={setSavingAsTemplateFor}
           />
           {/* Completed */}
           <TodoSection
@@ -1748,6 +2595,7 @@ export default function HomePage() {
             onToggle={handleToggle}
             onEdit={setEditingTodo}
             onDelete={setDeletingTodo}
+            onSaveAsTemplate={setSavingAsTemplateFor}
           />
           {/* Empty state */}
           {overdue.length === 0 && active.length === 0 && completed.length === 0 && (
@@ -1791,6 +2639,51 @@ export default function HomePage() {
           onRecolor={handleTagRecolor}
           onDelete={handleTagDelete}
           onClose={() => setShowTagManager(false)}
+        />
+      )}
+
+      {/* PRP 07 — Save as Template modal */}
+      {savingAsTemplateFor && (
+        <SaveAsTemplateModal
+          todo={savingAsTemplateFor}
+          onClose={() => setSavingAsTemplateFor(null)}
+          onSaved={fetchTemplates}
+          showError={showError}
+        />
+      )}
+
+      {/* PRP 07 — Template Picker modal */}
+      {showTemplatePicker && (
+        <TemplatePickerModal
+          templates={templates}
+          onClose={() => setShowTemplatePicker(false)}
+          onCreated={(todo) => {
+            setTodos((prev) => [...prev, todo])
+            fetchTodos()
+          }}
+          showError={showError}
+          onManage={() => {
+            setShowTemplatePicker(false)
+            setShowManageTemplates(true)
+          }}
+        />
+      )}
+
+      {/* PRP 07 — Manage Templates modal */}
+      {showManageTemplates && (
+        <ManageTemplatesModal
+          templates={templates}
+          onClose={() => setShowManageTemplates(false)}
+          onTemplatesChanged={fetchTemplates}
+        />
+      )}
+
+      {/* PRP 09 — Import modal */}
+      {showImportModal && (
+        <ImportModal
+          onClose={() => setShowImportModal(false)}
+          onImported={fetchTodos}
+          showError={showError}
         />
       )}
 

@@ -218,3 +218,39 @@ export function isDueForNotification(
   if (lastSentISO && new Date(lastSentISO) >= trigger) return false // already sent this window
   return true
 }
+
+// ---------------------------------------------------------------------------
+// PRP 10 — Calendar View helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the UTC ISO strings for the SGT-midnight boundaries of a requested month.
+ * Midnight SGT (UTC+8) = the same day at 00:00+08:00 = previous day at 16:00 UTC.
+ *
+ * Example: July 2026
+ *   startUtc = "2026-06-30T16:00:00.000Z"  (July 1 00:00 SGT)
+ *   endUtc   = "2026-07-31T16:00:00.000Z"  (August 1 00:00 SGT, exclusive upper bound)
+ */
+export function getMonthBoundsUtc(
+  year: number,
+  month: number,
+): { startUtc: string; endUtc: string } {
+  const startUtcMs = Date.UTC(year, month - 1, 1) - SGT_OFFSET_MS
+  const nextYear = month === 12 ? year + 1 : year
+  const nextMonth = month === 12 ? 1 : month + 1
+  const endUtcMs = Date.UTC(nextYear, nextMonth - 1, 1) - SGT_OFFSET_MS
+  return {
+    startUtc: new Date(startUtcMs).toISOString(),
+    endUtc: new Date(endUtcMs).toISOString(),
+  }
+}
+
+/**
+ * Converts a UTC ISO string to a "YYYY-MM-DD" date string in Singapore time.
+ * Used client-side to group todos by their SGT calendar day.
+ */
+export function formatCalendarDate(isoUtc: string): string {
+  const sgt = new Date(new Date(isoUtc).getTime() + SGT_OFFSET_MS)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${sgt.getUTCFullYear()}-${pad(sgt.getUTCMonth() + 1)}-${pad(sgt.getUTCDate())}`
+}

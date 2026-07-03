@@ -182,6 +182,26 @@ export function getDb(): Database.Database {
       BEGIN
         UPDATE todos SET updated_at = datetime('now') WHERE id = OLD.id;
       END;
+
+      CREATE TABLE IF NOT EXISTS templates (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name             TEXT    NOT NULL,
+        category         TEXT,
+        priority         TEXT    NOT NULL DEFAULT 'medium',
+        recurrence       TEXT,
+        reminder_minutes INTEGER,
+        due_offset_days  INTEGER,
+        subtasks         TEXT    NOT NULL DEFAULT '[]',
+        created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS holidays (
+        id   INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT    NOT NULL UNIQUE,
+        name TEXT    NOT NULL
+      );
     `)
 
     // PRP 05 — index on subtasks.todo_id for O(log n) lookups per parent todo
@@ -220,6 +240,12 @@ export function getDb(): Database.Database {
     // PRP 06 — indexes on todo_tags for fast joins in both directions
     db.exec(`CREATE INDEX IF NOT EXISTS idx_todo_tags_todo_id ON todo_tags(todo_id)`)
     db.exec(`CREATE INDEX IF NOT EXISTS idx_todo_tags_tag_id ON todo_tags(tag_id)`)
+
+    // PRP 07 — index on templates.user_id
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_templates_user ON templates(user_id)`)
+
+    // PRP 10 — index on holidays.date
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_holidays_date ON holidays(date)`)
 
     global._sqliteDb = db
   }
@@ -529,5 +555,450 @@ export const tagDB = {
       )
       .get(id, userId) as { cnt: number } | undefined
     return row?.cnt ?? 0
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Template types + CRUD helpers (PRP 07 — Template System)
+// ---------------------------------------------------------------------------
+
+export interface SubtaskTemplate {
+  title: string
+  position: number
+}
+
+export interface Template {
+  id: number
+  user_id: number
+  name: string
+  category: string | null
+  priority: Priority
+  recurrence: RecurrencePattern | null
+  reminder_minutes: number | null
+  due_offset_days: number | null
+  subtasks: string  // JSON-serialized SubtaskTemplate[]
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateTemplateInput {
+  name: string
+  category?: string | null
+  priority?: Priority
+  recurrence?: RecurrencePattern | null
+  reminder_minutes?: number | null
+  due_offset_days?: number | null
+  subtasks?: SubtaskTemplate[]
+}
+
+export interface UpdateTemplateInput {
+  name?: string
+  category?: string | null
+  priority?: Priority
+  recurrence?: RecurrencePattern | null
+  reminder_minutes?: number | null
+  due_offset_days?: number | null
+  subtasks?: SubtaskTemplate[]
+}
+
+export function parseSubtasks(json: string): SubtaskTemplate[] {
+  try {
+    const parsed = JSON.parse(json)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+export function serializeSubtasks(items: SubtaskTemplate[]): string {
+  return JSON.stringify(items)
+}
+
+// ---------------------------------------------------------------------------
+// Holiday types + CRUD helpers (PRP 10 — Calendar View)
+// ---------------------------------------------------------------------------
+
+export interface Holiday {
+  id: number
+  date: string  // YYYY-MM-DD in SGT
+  name: string
+}
+
+export const holidayDB = {
+  /** Return all holidays for a given year-month (e.g. year=2026, month=7). */
+  listByMonth(year: number, month: number): Holiday[] {
+    const prefix = `${year}-${String(month).padStart(2, '0')}`
+    return getDb()
+      .prepare('SELECT id, date, name FROM holidays WHERE date LIKE ?')
+      .all(`${prefix}-%`) as Holiday[]
+  },
+
+  /** Insert a holiday; silently ignores duplicates (idempotent seeding). */
+  upsert(date: string, name: string): void {
+    getDb()
+      .prepare('INSERT OR IGNORE INTO holidays (date, name) VALUES (?, ?)')
+      .run(date, name)
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Export / Import helpers (PRP 09 — Export & Import)
+// ---------------------------------------------------------------------------
+
+export interface ExportTodo {
+  id: number
+  title: string
+  description: string | null
+  completed: 0 | 1
+  priority: Priority
+  due_date: string | null
+  recurrence: RecurrencePattern | null
+  reminder_minutes: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ExportTag {
+  id: number
+  name: string
+  color: string
+}
+
+export interface ExportDocument {
+  version: 1
+  exported_at: string
+  todos: ExportTodo[]
+  subtasks: Subtask[]
+  tags: ExportTag[]
+  todo_tags: Array<{ todo_id: number; tag_id: number }>
+}
+
+export interface ImportResult {
+  todos: number
+  subtasks: number
+  tags: number
+}
+
+/** Assembles the full export object for a given user. Read-only; no transaction needed. */
+export function exportUserData(userId: number): ExportDocument {
+  const db = getDb()
+
+  const todos = db
+    .prepare(
+      'SELECT id, title, description, completed, priority, due_date, recurrence, reminder_minutes, created_at, updated_at FROM todos WHERE user_id = ?'
+    )
+    .all(userId) as ExportTodo[]
+
+  const todoIds = todos.map((t) => t.id)
+
+  const subtasks: Subtask[] = []
+  const todo_tags: Array<{ todo_id: number; tag_id: number }> = []
+
+  if (todoIds.length > 0) {
+    const CHUNK = 900
+    for (let i = 0; i < todoIds.length; i += CHUNK) {
+      const chunk = todoIds.slice(i, i + CHUNK)
+      const ph = chunk.map(() => '?').join(',')
+      subtasks.push(
+        ...(db
+          .prepare(`SELECT id, todo_id, title, completed, position FROM subtasks WHERE todo_id IN (${ph})`)
+          .all(...chunk) as Subtask[])
+      )
+      todo_tags.push(
+        ...(db
+          .prepare(`SELECT todo_id, tag_id FROM todo_tags WHERE todo_id IN (${ph})`)
+          .all(...chunk) as Array<{ todo_id: number; tag_id: number }>)
+      )
+    }
+  }
+
+  const tags = db
+    .prepare('SELECT id, name, color FROM tags WHERE user_id = ?')
+    .all(userId) as ExportTag[]
+
+  return {
+    version: 1,
+    exported_at: new Date().toISOString(),
+    todos,
+    subtasks,
+    tags,
+    todo_tags,
+  }
+}
+
+function validateImportPayload(payload: unknown): string[] {
+  const errors: string[] = []
+
+  if (typeof payload !== 'object' || payload === null) {
+    return ['Payload must be a JSON object']
+  }
+
+  const p = payload as Record<string, unknown>
+
+  if (p.version !== 1) {
+    errors.push('version must be 1')
+  }
+
+  const todoIdSet = new Set<number>()
+  if (!Array.isArray(p.todos)) {
+    errors.push('todos must be an array')
+  } else {
+    for (let i = 0; i < p.todos.length; i++) {
+      const todo = p.todos[i]
+      if (typeof todo !== 'object' || todo === null) {
+        errors.push(`todos[${i}] must be an object`)
+        continue
+      }
+      const t = todo as Record<string, unknown>
+      if (typeof t.id === 'number') todoIdSet.add(t.id)
+      if (typeof t.title !== 'string' || (t.title as string).trim().length === 0) {
+        errors.push(`Todo at index ${i} is missing a title`)
+      } else if ((t.title as string).length > 200) {
+        errors.push(`Todo at index ${i} title exceeds 200 characters`)
+      }
+      if (t.completed !== 0 && t.completed !== 1) {
+        errors.push(`Todo at index ${i}: completed must be 0 or 1`)
+      }
+      if (t.priority !== null && t.priority !== undefined && !(PRIORITY_VALUES as string[]).includes(t.priority as string)) {
+        errors.push(`Todo at index ${i}: priority must be one of ${PRIORITY_VALUES.join(', ')} or null`)
+      }
+      if (t.due_date !== null && t.due_date !== undefined && typeof t.due_date !== 'string') {
+        errors.push(`Todo at index ${i}: due_date must be an ISO 8601 string or null`)
+      }
+      if (t.recurrence !== null && t.recurrence !== undefined && !(RECURRENCE_VALUES as string[]).includes(t.recurrence as string)) {
+        errors.push(`Todo at index ${i}: recurrence must be one of ${RECURRENCE_VALUES.join(', ')} or null`)
+      }
+      if (t.reminder_minutes !== null && t.reminder_minutes !== undefined && !REMINDER_MINUTES_VALUES.includes(t.reminder_minutes as number)) {
+        errors.push(`Todo at index ${i}: reminder_minutes must be one of ${REMINDER_MINUTES_VALUES.join(', ')} or null`)
+      }
+    }
+  }
+
+  const tagIdSet = new Set<number>()
+  if (!Array.isArray(p.tags)) {
+    errors.push('tags must be an array')
+  } else {
+    for (let i = 0; i < p.tags.length; i++) {
+      const tag = p.tags[i]
+      if (typeof tag !== 'object' || tag === null) {
+        errors.push(`tags[${i}] must be an object`)
+        continue
+      }
+      const t = tag as Record<string, unknown>
+      if (typeof t.id === 'number') tagIdSet.add(t.id)
+      if (typeof t.name !== 'string' || (t.name as string).trim().length === 0) {
+        errors.push(`Tag at index ${i} is missing a name`)
+      } else if ((t.name as string).length > 50) {
+        errors.push(`Tag at index ${i} name exceeds 50 characters`)
+      }
+    }
+  }
+
+  if (!Array.isArray(p.subtasks)) {
+    errors.push('subtasks must be an array')
+  } else {
+    for (let i = 0; i < p.subtasks.length; i++) {
+      const sub = p.subtasks[i]
+      if (typeof sub !== 'object' || sub === null) {
+        errors.push(`subtasks[${i}] must be an object`)
+        continue
+      }
+      const s = sub as Record<string, unknown>
+      if (typeof s.todo_id !== 'number' || !todoIdSet.has(s.todo_id)) {
+        errors.push(`Subtask at index ${i}: todo_id references an invalid todo`)
+      }
+      if (typeof s.title !== 'string' || (s.title as string).trim().length === 0) {
+        errors.push(`Subtask at index ${i} is missing a title`)
+      } else if ((s.title as string).length > 200) {
+        errors.push(`Subtask at index ${i} title exceeds 200 characters`)
+      }
+      if (s.completed !== 0 && s.completed !== 1) {
+        errors.push(`Subtask at index ${i}: completed must be 0 or 1`)
+      }
+      if (typeof s.position !== 'number' || !Number.isInteger(s.position) || s.position < 1) {
+        errors.push(`Subtask at index ${i}: position must be a positive integer`)
+      }
+    }
+  }
+
+  if (!Array.isArray(p.todo_tags)) {
+    errors.push('todo_tags must be an array')
+  } else {
+    for (let i = 0; i < p.todo_tags.length; i++) {
+      const tt = p.todo_tags[i]
+      if (typeof tt !== 'object' || tt === null) {
+        errors.push(`todo_tags[${i}] must be an object`)
+        continue
+      }
+      const item = tt as Record<string, unknown>
+      if (typeof item.todo_id !== 'number' || !todoIdSet.has(item.todo_id)) {
+        errors.push(`todo_tags[${i}]: todo_id references an invalid todo`)
+      }
+      if (typeof item.tag_id !== 'number' || !tagIdSet.has(item.tag_id)) {
+        errors.push(`todo_tags[${i}]: tag_id references an invalid tag`)
+      }
+    }
+  }
+
+  return errors
+}
+
+/**
+ * Validates and imports an export document for a given user.
+ * Runs entirely inside a SQLite transaction — all records created or none.
+ * Throws `{ code: 'VALIDATION_ERROR', errors: string[] }` on invalid payload.
+ */
+export function importUserData(userId: number, payload: unknown): ImportResult {
+  const errors = validateImportPayload(payload)
+  if (errors.length > 0) {
+    throw { code: 'VALIDATION_ERROR', errors }
+  }
+
+  const data = payload as ExportDocument
+  const db = getDb()
+
+  let todosInserted = 0
+  let subtasksInserted = 0
+  let tagsInserted = 0
+
+  const runImport = db.transaction(() => {
+    // Step 1: Tags — reuse existing by name (case-insensitive), or insert new
+    const tagIdMap = new Map<number, number>()
+    for (const tag of data.tags) {
+      const existing = db
+        .prepare('SELECT id FROM tags WHERE user_id = ? AND name = ? COLLATE NOCASE')
+        .get(userId, tag.name) as { id: number } | undefined
+      if (existing) {
+        tagIdMap.set(tag.id, existing.id)
+      } else {
+        const result = db
+          .prepare('INSERT INTO tags (user_id, name, color) VALUES (?, ?, ?)')
+          .run(userId, tag.name, tag.color)
+        tagIdMap.set(tag.id, result.lastInsertRowid as number)
+        tagsInserted++
+      }
+    }
+
+    // Step 2: Todos — insert under current user, reset notification timestamp
+    const todoIdMap = new Map<number, number>()
+    for (const todo of data.todos) {
+      const result = db
+        .prepare(
+          `INSERT INTO todos
+             (user_id, title, description, completed, priority, due_date, recurrence, reminder_minutes, last_notification_sent)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+        )
+        .run(
+          userId,
+          todo.title,
+          todo.description ?? null,
+          todo.completed,
+          todo.priority ?? 'medium',
+          todo.due_date ?? null,
+          todo.recurrence ?? null,
+          todo.reminder_minutes ?? null,
+        )
+      todoIdMap.set(todo.id, result.lastInsertRowid as number)
+      todosInserted++
+    }
+
+    // Step 3: Subtasks — insert using remapped todo IDs
+    for (const subtask of data.subtasks) {
+      const newTodoId = todoIdMap.get(subtask.todo_id)
+      if (newTodoId === undefined) continue
+      db.prepare(
+        'INSERT INTO subtasks (todo_id, title, completed, position) VALUES (?, ?, ?, ?)'
+      ).run(newTodoId, subtask.title, subtask.completed, subtask.position)
+      subtasksInserted++
+    }
+
+    // Step 4: todo_tags — insert using remapped IDs
+    for (const tt of data.todo_tags) {
+      const newTodoId = todoIdMap.get(tt.todo_id)
+      const newTagId = tagIdMap.get(tt.tag_id)
+      if (newTodoId === undefined || newTagId === undefined) continue
+      db.prepare('INSERT OR IGNORE INTO todo_tags (todo_id, tag_id) VALUES (?, ?)').run(newTodoId, newTagId)
+    }
+  })
+
+  runImport()
+
+  return { todos: todosInserted, subtasks: subtasksInserted, tags: tagsInserted }
+}
+
+export const templateDB = {
+  create(userId: number, input: CreateTemplateInput): Template {
+    const db = getDb()
+    const subtasksJson = serializeSubtasks(input.subtasks ?? [])
+    const result = db
+      .prepare(
+        `INSERT INTO templates (user_id, name, category, priority, recurrence, reminder_minutes, due_offset_days, subtasks)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        userId,
+        input.name,
+        input.category ?? null,
+        input.priority ?? 'medium',
+        input.recurrence ?? null,
+        input.reminder_minutes ?? null,
+        input.due_offset_days ?? null,
+        subtasksJson,
+      )
+    return db.prepare('SELECT * FROM templates WHERE id = ?').get(result.lastInsertRowid) as Template
+  },
+
+  list(userId: number): Template[] {
+    return getDb()
+      .prepare('SELECT * FROM templates WHERE user_id = ? ORDER BY name COLLATE NOCASE')
+      .all(userId) as Template[]
+  },
+
+  findById(id: number): Template | undefined {
+    return getDb()
+      .prepare('SELECT * FROM templates WHERE id = ?')
+      .get(id) as Template | undefined
+  },
+
+  update(id: number, userId: number, input: UpdateTemplateInput): Template | undefined {
+    const db = getDb()
+    const existing = db
+      .prepare('SELECT * FROM templates WHERE id = ? AND user_id = ?')
+      .get(id, userId) as Template | undefined
+    if (!existing) return undefined
+
+    const newName = input.name ?? existing.name
+    const newCategory = input.category !== undefined ? input.category : existing.category
+    const newPriority = input.priority ?? existing.priority
+    const newRecurrence = input.recurrence !== undefined ? input.recurrence : existing.recurrence
+    const newReminderMinutes =
+      input.reminder_minutes !== undefined ? input.reminder_minutes : existing.reminder_minutes
+    const newDueOffsetDays =
+      input.due_offset_days !== undefined ? input.due_offset_days : existing.due_offset_days
+    const newSubtasksJson =
+      input.subtasks !== undefined ? serializeSubtasks(input.subtasks) : existing.subtasks
+
+    db.prepare(
+      `UPDATE templates
+       SET name = ?, category = ?, priority = ?, recurrence = ?, reminder_minutes = ?,
+           due_offset_days = ?, subtasks = ?, updated_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       WHERE id = ?`
+    ).run(newName, newCategory, newPriority, newRecurrence, newReminderMinutes, newDueOffsetDays, newSubtasksJson, id)
+
+    return db.prepare('SELECT * FROM templates WHERE id = ?').get(id) as Template
+  },
+
+  delete(id: number, userId: number): boolean {
+    const result = getDb()
+      .prepare('DELETE FROM templates WHERE id = ? AND user_id = ?')
+      .run(id, userId)
+    return result.changes > 0
+  },
+
+  ownerUserId(id: number): number | null {
+    const row = getDb()
+      .prepare('SELECT user_id FROM templates WHERE id = ?')
+      .get(id) as { user_id: number } | undefined
+    return row?.user_id ?? null
   },
 }
