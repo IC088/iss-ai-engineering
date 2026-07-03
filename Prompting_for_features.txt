@@ -212,3 +212,387 @@ Each item below must map to a specific, testable requirement in the relevant PRP
 ## Output format
 
 Return only the finished Markdown file content for `PRPs/02-priority-system.md` — no preamble, no explanation, ready to save directly.
+
+
+Generate Features 1, 2 Prompt:
+
+---
+
+User: @workspace
+
+We are planning the following:
+
+You are a **senior backend engineer** with deep experience designing REST APIs, relational schemas, and validation logic for production systems. You care about correctness, edge cases, and leaving nothing ambiguous for whoever implements this next — whether that's a junior engineer or an AI coding agent. You are pragmatic: you don't over-engineer, but you don't hand-wave error handling or timezone logic either.
+
+**Task:** Generate a complete Product Requirement Prompt (PRP) file at `PRPs/01-todo-crud-operations.md` for the **Todo CRUD Operations** feature of this app.
+
+Before writing, read `.github/copilot-instructions.md` and `USER_GUIDE.md` for project-wide conventions (Next.js 16 App Router, better-sqlite3 synchronous DB calls, `lib/timezone.ts` for all Singapore timezone logic, Playwright for E2E tests). Follow those patterns exactly — do not invent a different stack or async DB calls.
+
+## Feature scope
+
+Todo CRUD Operations covers:
+
+- Create, read, update, delete todos
+- Singapore timezone (`Asia/Singapore`) handling for due dates
+- Validation rules and error handling
+- Optimistic UI updates
+
+## Required PRP structure
+
+Write the file using this structure, matching the sibling PRPs already indexed in `PRPs/README.md`:
+
+1. **Feature Overview** — one paragraph, plain language
+2. **User Stories** — at least 2 personas (e.g. someone quickly capturing a task vs. someone planning a due date)
+3. **User Flow** — step-by-step for create, edit, complete, delete
+4. **Technical Requirements**
+
+- Full SQLite schema for the `todos` table (id, title, description, due_date, completed, created_at, updated_at, and any FK fields needed for later features like priority/tags/subtasks — reference but don't implement those)
+- All 5 API endpoints with request/response shape and status codes
+- TypeScript types/interfaces for the Todo entity
+- Explicit Singapore timezone handling: how due dates are stored (UTC in DB) vs. displayed/validated (SGT), using `lib/timezone.ts`
+5. **UI Components** — form, list sections, edit modal, delete confirmation, with React code examples
+6. **Edge Cases** — at minimum: empty/whitespace-only title, due date in the past, due date exactly "now", concurrent edits, delete of a todo with dependent subtasks/tags, network failure during optimistic update (rollback behavior)
+7. **Acceptance Criteria**
+8. **Testing Requirements** — E2E (Playwright) and unit test cases
+9. **Out of Scope** — explicitly exclude priority system, recurrence, subtasks, tags, reminders (those are separate PRPs 02–06)
+10. **Success Metrics**
+
+## Non-negotiable requirements to bake into the PRP
+
+The generated PRP **must** be detailed enough that an implementation checked against it would satisfy every item below. Write the PRP so each of these maps to a specific section (API contract, validation rule, UI requirement, or test case) — don't just restate them as a checklist, actually specify the behavior that satisfies them:
+
+**Implementation**
+
+- Database schema with all required fields (title, description, due_date, completed, timestamps, and FK placeholders for priority/recurring/subtasks/tags)
+- `POST /api/todos` — create
+- `GET /api/todos` — list all
+- `GET /api/todos/[id]` — read one
+- `PUT /api/todos/[id]` — update
+- `DELETE /api/todos/[id]` — delete
+- Singapore timezone validation for due dates (specify exact conversion/validation logic, not just "handle timezone")
+- Title validation: non-empty, trimmed, with the exact error message and HTTP status returned
+- Due date must be in the future — minimum 1 minute ahead of current SGT time; specify the exact boundary check
+- UI form for creating todos
+- UI display split into Overdue / Active / Completed sections, with the sorting rule for each
+- Toggle-completion checkbox behavior (including what happens to due-date display once completed)
+- Edit modal/form (pre-filled, same validation as create)
+- Delete confirmation dialog copy and behavior
+- Optimistic UI update pattern: what updates immediately, what the rollback looks like on API failure, and how errors surface to the user
+
+**Testing** — include these as explicit Playwright E2E test case names/descriptions:
+
+- Create todo with title only
+- Create todo with all metadata
+- Edit todo
+- Toggle completion
+- Delete todo
+- Past due date validation (rejected with correct error)
+
+**Acceptance Criteria** — the PRP's acceptance criteria section must explicitly state:
+
+- Can create a todo with just a title
+- Can create a todo with priority, due date, recurring, and reminder fields populated (even though those features are built later, the schema/API must accept them)
+- Todos are sorted by priority and due date
+- Completed todos move to the Completed section
+- Deleting a todo cascades to its subtasks and tags
+
+## Security & implementation guardrails
+
+The PRP must bake these into the relevant sections (Technical Requirements, Edge Cases, Acceptance Criteria) as concrete, testable requirements — not as a vague "handle securely" note. For each guardrail below, specify exactly what the endpoint must do.
+
+**Input validation & sanitization**
+
+- Every field has an explicit type, max length, and allowed-character rule (e.g. `title`: string, trimmed, 1–200 chars; `description`: string, max 2000 chars, optional)
+- Reject unknown/extra fields in the request body — do not silently accept or store them
+- Reject requests where `id` in the URL is not a valid integer/UUID format before hitting the DB
+- Strip or reject HTML/script content in `title`/`description` (stored-XSS prevention) — specify whether this is done via encoding on output or rejection on input, and be consistent
+- Date fields must be parsed with a strict format check (reject malformed strings like `"tomorrow"` or `"2026-13-45"`) before any timezone conversion is attempted
+
+**Query safety**
+
+- All database access uses better-sqlite3 **parameterized/prepared statements** — no string concatenation or template literals building SQL, even for internal fields
+- State explicitly that dynamic `ORDER BY`/filter clauses (if any) must come from an allowlist of column names, never from raw user input
+
+**Mass assignment / field allowlisting**
+
+- `PUT /api/todos/[id]` only updates fields explicitly present in a defined allowlist (title, description, due_date, completed) — server-controlled fields like `id`, `created_at` must be ignored even if present in the request body
+- Specify what happens if the client sends a field like `completed_at` or tries to change `created_at` — it's silently dropped, not an error, but also not applied
+
+**Error handling**
+
+- Define a standard error response shape (e.g. `{ error: { code, message } }`) used across all 5 endpoints
+- Internal errors (DB failures, unexpected exceptions) return a generic 500 message to the client; the real error/stack is only logged server-side, never returned in the response body
+- Validation errors return 400 with a field-level message (e.g. `{ error: { code: "INVALID_DUE_DATE", message: "Due date must be at least 1 minute in the future" } }`)
+- Not-found (`GET/PUT/DELETE` on a missing id) returns 404, not 500 or an empty 200
+- Define behavior for a DB write failure mid-request (e.g. delete cascade partially fails) — must not leave orphaned rows; specify whether it's wrapped in a transaction
+
+**Rate limiting / abuse prevention**
+
+- State the expected request-size limit for the request body (e.g. reject bodies over a defined KB limit before parsing)
+- Note (even if enforcement lands with Feature 11 auth) that write endpoints (`POST`/`PUT`/`DELETE`) should be identified as needing per-session/per-IP rate limiting once authentication exists — flag this as a dependency rather than silently ignoring it
+
+**HTTP semantics & idempotency**
+
+- `DELETE` on an already-deleted or nonexistent id returns 404, not a 200/204 — deletes are not silently idempotent-success
+- `PUT` on a nonexistent id returns 404, does not upsert/create
+- Correct status codes throughout: 201 (create), 200 (read/update), 204 or 200 (delete — pick one and be consistent), 400 (validation), 404 (not found), 500 (server error)
+
+**Timezone-specific guardrails**
+
+- Specify exactly where timezone conversion happens (at the API boundary, using `lib/timezone.ts`) so it can't be bypassed by a client sending a pre-converted UTC value that fails the "future" check inconsistently
+- Define behavior for a `due_date` with no timezone info in the string, vs. one with an explicit offset
+
+**Logging & observability**
+
+- Log validation failures and 500s with enough context to debug (endpoint, id, error type) but explicitly exclude full request bodies from logs if they could later contain sensitive fields (forward-looking, since auth/PII may be added later)
+
+## Output format
+
+Return only the finished Markdown file content for `PRPs/01-todo-crud-operations.md` — no preamble, no explanation, ready to save directly.
+
+GitHub Copilot: Updated todo list
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/.github/copilot-instructions.md#1-1), lines 1 to 100
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/USER_GUIDE.md#1-1), lines 1 to 100
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/USER_GUIDE.md#101-101), lines 101 to 200
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/.github/copilot-instructions.md#101-101), lines 101 to 181
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/USER_GUIDE.md#201-201), lines 201 to 400
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/PRPs/02-priority-system.md)
+
+Now I have sufficient context. Let me create the PRP file. 
+
+Created [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/PRPs/01-todo-crud-operations.md)
+
+01-todo-crud-operations.md is created. Here's what's covered:
+
+**Structure** — all 10 required sections in the standard PRP format.
+
+**Key technical decisions baked in**:
+- Full `todos` schema with `priority`/`recurrence`/`reminder_minutes` FK placeholder columns, the `updated_at` trigger, and FK indexes
+- All 5 endpoints with exact request/response shapes, status codes, and prepared-statement patterns
+- `parseDueDateToUtc()` handles the no-offset-→-SGT case explicitly, with a regex that rejects `"tomorrow"` and `"2026-13-45"` before any conversion
+- `isDueDateValid()` checks against `getSingaporeNow() + 60_000 ms` server-side — can't be bypassed by a pre-converted client timestamp
+- PUT allowlist (only 7 fields; `id`/`created_at`/`user_id` silently dropped, never errored)
+- Unknown-field rejection (`UNKNOWN_FIELDS` 400) on both POST and PUT
+- DELETE wrapped in `db.transaction()` with `PRAGMA foreign_keys = ON` for atomic cascade
+- HTML/script rejection at input (`<`, `>`, `javascript:`) with dual defence note (also rely on React JSX escaping on output)
+- 64 KB body size limit guard
+- `// TODO(PRP-11): add rate limit` comments flagged on write endpoints
+- Standard `{ error: { code, message } }` envelope with internal errors never leaking stack traces
+
+**Testing** — 10 named Playwright E2E test cases (`TC-01` through `TC-10`) + 12 unit tests (`UT-01` through `UT-12`) covering parse/validate/allowlist logic.
+
+Created 4 todos
+
+Made changes.
+
+User: @workspace
+
+You are a **senior backend engineer** with deep experience designing REST APIs, relational schemas, and validation logic for production systems. You care about correctness, edge cases, and leaving nothing ambiguous for whoever implements this next — whether that's a junior engineer or an AI coding agent. You are pragmatic: you don't over-engineer, but you don't hand-wave validation, migrations, or accessibility either.
+
+**Task:** Generate a complete Product Requirement Prompt (PRP) file at `PRPs/02-priority-system.md` for the **Priority System** feature of this app.
+
+Before writing, read `.github/copilot-instructions.md`, `USER_GUIDE.md`, and **`PRPs/01-todo-crud-operations.md`** (this feature extends the CRUD feature — do not redefine the todos table or the 5 CRUD endpoints, only extend them). Follow existing project conventions exactly — Next.js 16 App Router, better-sqlite3 synchronous DB calls, Tailwind CSS 4 for styling.
+
+## Feature scope
+
+Priority System covers:
+
+- Three-level priority (High / Medium / Low)
+- Color-coded badges
+- Automatic sorting
+- Priority filtering
+
+This is an **extension** of Feature 01 (Todo CRUD), not a standalone feature. The PRP must be explicit about which existing files/endpoints from `01-todo-crud-operations.md` it modifies versus what's new.
+
+## Required PRP structure
+
+Match the structure used in `01-todo-crud-operations.md`:
+
+1. **Feature Overview**
+2. **User Stories** — at least 2 personas (e.g. someone triaging a long list vs. someone who wants to see only urgent items)
+3. **User Flow** — setting priority on create, changing it on edit, filtering the list
+4. **Technical Requirements**
+
+- Migration: adding `priority` column to the existing `todos` table, with default value and backfill behavior for existing rows
+- `type Priority = 'high' | 'medium' | 'low'` and where it's defined/shared between frontend and backend
+- Which existing CRUD endpoints (from PRP 01) need to change, and exactly how (request/response shape diffs)
+- Sorting algorithm: exact tie-break order when priority is equal (falls back to due date per PRP 01)
+- Filter query param/mechanism for `GET /api/todos`
+5. **UI Components** — badge component (with the 3 color mappings), dropdown in create/edit forms, filter dropdown, with React code examples
+6. **Edge Cases** — missing/invalid priority value in request body, existing todos created before this migration, sort stability when priority and due date are both equal, filter selection combined with Overdue/Active/Completed sections from PRP 01
+7. **Acceptance Criteria**
+8. **Testing Requirements** — E2E (Playwright) and visual/accessibility test cases
+9. **Out of Scope** — explicitly exclude tag system, templates, custom priority levels beyond the 3 fixed ones
+10. **Success Metrics**
+
+## Non-negotiable requirements to bake into the PRP
+
+Each item below must map to a specific, testable requirement in the relevant PRP section — not just be restated as a checklist:
+
+**Implementation**
+
+- `priority` field added to the `todos` table via migration, default `'medium'` for both new rows and existing rows (specify the migration statement)
+- Shared `type Priority = 'high' | 'medium' | 'low'` definition, imported by both API routes and UI — not duplicated as separate string literals
+- Priority validated in API routes: any value outside the 3 allowed strings is rejected (specify status code and error shape, consistent with the error format defined in PRP 01)
+- Default priority is `'medium'` when omitted from create requests
+- Priority badge component with a fixed color mapping (red = high, yellow = medium, blue = low) — specify this mapping explicitly so it can't drift
+- Priority dropdown present in both the create form and the edit form from PRP 01, constrained to the 3 valid values (no free text)
+- Priority filter dropdown in the UI, filtering the todo list to a single selected priority (or "all")
+- Todos auto-sort by priority (high → medium → low) as the primary sort key, with the PRP 01 due-date sort as the secondary/tie-break key
+- Badge colors specified for both light and dark mode, with actual color values (not just "make it work in dark mode")
+
+**Testing** — include as explicit Playwright/visual test case names:
+
+- Create todo with each priority level (high, medium, low)
+- Edit priority on an existing todo
+- Filter by priority
+- Verify sort order (high → medium → low)
+- Visual test: badge colors render correctly in light and dark mode
+
+**Acceptance Criteria** — must explicitly state:
+
+- All three priority levels are functional end-to-end (create, edit, persist, display)
+- Color-coded badges are visible and match the defined mapping
+- Automatic sorting by priority works, with the correct tie-break behavior
+- Filter shows only todos matching the selected priority
+- Badge color contrast meets WCAG AA in both light and dark mode
+
+## Guardrails to bake in
+
+**Data integrity**
+
+- Priority is validated against an allowlist (`'high' | 'medium' | 'low'`) at the API boundary — never trust the client value directly in a DB write or in a sort/filter query
+- The filter query param is validated against the same allowlist before being used in any SQL — never interpolated directly into an `ORDER BY` or `WHERE` clause; use parameterized queries or a lookup table mapping the value to a safe column reference
+- Migration is idempotent and non-destructive: running it on a database that already has the `priority` column (or already has data) must not error or overwrite existing values
+
+**Error handling**
+
+- Invalid priority value in a create/update request returns 400 with a field-level error (e.g. `{ error: { code: "INVALID_PRIORITY", message: "Priority must be one of: high, medium, low" } }`), consistent with the error shape from PRP 01
+- Omitted priority does not error — it defaults to `'medium'`, and the PRP should state this default applies at the API layer, not just the UI layer (so direct API calls without a priority field still get a valid row)
+
+**Accessibility guardrails**
+
+- Badge colors are never the only signal — specify a text label or icon accompanying each badge so priority isn't conveyed by color alone (WCAG 1.4.1)
+- Specify the exact contrast ratio target (WCAG AA = 4.5:1 for text) and note it applies to both light and dark mode badge variants
+
+## Output format
+
+Return only the finished Markdown file content for `PRPs/02-priority-system.md` — no preamble, no explanation, ready to save directly.
+
+GitHub Copilot: Updated todo list
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/PRPs/01-todo-crud-operations.md#1-1), lines 1 to 100
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/USER_GUIDE.md#39-39), lines 39 to 90
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/PRPs/01-todo-crud-operations.md#101-101), lines 101 to 300
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/PRPs/01-todo-crud-operations.md#301-301), lines 301 to 550
+
+Now I have everything I need. Let me write PRP 02. 
+
+Replacing 1 lines with 666 lines in [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/PRPs/02-priority-system.md)
+
+
+```
+
+```
+02-priority-system.md is written. Key decisions made:
+
+**Explicit extension model** — the file opens with a clear "this does not redefine PRP 01 artifacts" disclaimer, then specifies exactly which endpoints change (only `GET /api/todos`) and which are untouched.
+
+**Tight type contract** — `Priority`, `PRIORITY_ORDER`, and `PRIORITY_VALUES` are all exported from `lib/db.ts` as the single source of truth. A `validatePriority()` helper is specified to be shared by both POST and PUT handlers, returning `'medium'` for absent/null and throwing the `INVALID_PRIORITY` error shape for anything else.
+
+**Badge color mapping locked down** — exact Tailwind classes for all 6 combinations (3 priorities × 2 modes) with verified contrast ratios (7.2:1 down to 5.0:1 — all above the 4.5:1 WCAG AA floor).
+
+**Accessibility baked in** — `aria-label="Priority: High"` pattern (word "Priority" explicit), `sr-only` label on dropdowns, explanation of forced-colors/High Contrast mode resilience via the text label.
+
+**Filter is client-side** — applied before the sectioning step in `useSectionedTodos`, with the `?priority=` server param added for payload efficiency on large lists. The param value is validated against `PRIORITY_VALUES` and bound as a prepared statement parameter — never interpolated into SQL.
+
+**Sort stability edge case** — explicitly calls out that JavaScript's stable sort preserves `created_at DESC` DB order as the final tie-break, with no additional comparator logic needed.
+
+Starting: *Review and finalize PRP file* (2/2)
+
+Made changes.
+
+User: You are operating as a **senior full-stack engineer** implementing this codebase feature-by-feature, exactly as specified in the attached PRPs. These documents are the spec, not a suggestion — where they give a schema, type, file path, function signature, error code, or test case, implement it verbatim. Where a PRP is silent on something, follow the existing conventions in `.github/copilot-instructions.md` and the surrounding codebase rather than inventing a new pattern.
+
+You will work through **two PRPs in strict sequence**: `PRPs/01-todo-crud-operations.md` first, then `PRPs/02-priority-system.md`. PRP 02 explicitly depends on and extends PRP 01 — do not start PRP 02 until PRP 01 is fully implemented and its own verification gate (below) passes.
+
+## Ground rules
+
+1. **Read both PRPs fully before writing any code.** PRP 02 references sections of PRP 01 by number (e.g. "rollback per PRP 01 §6.6") — resolve those references before implementing, don't guess at them.
+2. **Do not touch anything marked Out of Scope** in either PRP (e.g. PRP 01 excludes recurrence logic, subtask CRUD, rate limiting enforcement; PRP 02 excludes server-side sorting, custom priority tiers). If you find yourself writing code for an out-of-scope item to make something else work, stop and flag it instead of quietly implementing it.
+3. **Do not weaken any validation, error-handling, or security rule** specified in either PRP to make implementation easier (e.g. the 64 KB body limit, the unknown-field rejection, parameterized-query-only rule, the allowlist for `PUT` updates, the `priority` query-param allowlist check). These are load-bearing, not optional polish.
+4. **Preserve exact contract details**: error codes (`TITLE_REQUIRED`, `DUE_DATE_IN_PAST`, `INVALID_PRIORITY`, etc.), HTTP status codes, the `ApiError`/`ApiResponse<T>` envelope shape, and the `Priority`/`PRIORITY_ORDER`/`PRIORITY_VALUES` exports from `lib/db.ts` as the single source of truth — do not redeclare these types elsewhere.
+5. **If something in a PRP conflicts with existing code you find in the repo**, or is genuinely ambiguous, stop and ask rather than resolving it silently in either direction.
+
+## Execution plan
+
+### Phase 1 — PRP 01: Todo CRUD Operations
+
+Implement in this order (matches the PRP's own dependency chain):
+
+1. `lib/db.ts` — schema (`todos` table, trigger, indexes), migration try-catch blocks, TypeScript types (`Todo`, `Priority`, `RecurrencePattern`, `CreateTodoBody`, `UpdateTodoBody`, `ApiError`, `ApiResponse<T>`)
+2. `lib/timezone.ts` additions/confirmation — `getSingaporeNow()`, `formatSingaporeDate()`, `parseDueDateToUtc()`, `isDueDateValid()`, the no-offset-assumed-SGT rule, the ISO 8601 strict regex
+3. `app/api/todos/route.ts` — `POST` (create) and `GET` (list), including the request-size guard, field validation table, unknown-field rejection, and auth check
+4. `app/api/todos/[id]/route.ts` — `GET`, `PUT`, `DELETE`, including the URL-param integer check, the update allowlist, the transaction-wrapped cascade delete, and 404-not-upsert/404-not-silent-success semantics
+5. `app/page.tsx` and supporting components — create form, sectioned list (Overdue/Active/Completed with the exact sort rules), edit modal, delete confirmation dialog, optimistic update + rollback logic for all four mutations
+
+**Verification gate for Phase 1 — do not proceed to Phase 2 until all of these pass:**
+
+- All E2E test cases TC-01 through TC-10 (§8.1 of PRP 01) pass
+- All unit test cases UT-01 through UT-12 (§8.2 of PRP 01) pass
+- The Success Metrics table (§10 of PRP 01) is satisfied: no raw SQL string concatenation anywhere, delete cascade leaves zero orphaned rows, stored-XSS rejected at input
+- Report which test cases pass/fail before moving on. If any fail, fix and re-run before starting Phase 2.
+
+### Phase 2 — PRP 02: Priority System
+
+Only start once Phase 1's gate is green. Implement in this order:
+
+1. Confirm/finalize the `priority` migration and add the `idx_todos_priority` index in `lib/db.ts` (§4.1)
+2. Add `PRIORITY_ORDER` and `PRIORITY_VALUES` exports to `lib/db.ts` alongside the existing `Priority` type (§4.2) — do not redeclare `Priority` itself, it already exists from Phase 1
+3. Modify `GET /api/todos` to accept and validate the optional `?priority=` query param (§4.3) — `POST` and `PUT` already validate `priority` per PRP 01, confirm this is still true rather than re-implementing it
+4. Priority badge component (fixed color mapping, text label + `aria-label`, light/dark variants — §5, §8.2)
+5. Priority dropdown in create form and edit modal (constrained to the 3 values, default `medium`)
+6. Priority filter dropdown and client-side filter logic across all three sections
+7. Sort comparator update (`compareActive` or equivalent) implementing priority-first, due-date-second ordering
+
+**Verification gate for Phase 2:**
+
+- All E2E test cases TC-P01 through TC-P10 pass
+- All visual/accessibility test cases TC-V01 through TC-V05 pass (badge colors match the exact hex values given, text labels present, `aria-label` present, axe-core zero violations)
+- All unit test cases UT-P01 through UT-P11 pass
+- The Success Metrics table (§10 of PRP 02) is satisfied: zero `Priority` type redeclarations outside `lib/db.ts` (verify with a grep, not just visual inspection), migration is idempotent when run twice, WCAG AA contrast ≥ 4.5:1 on all 6 badge combinations
+
+## Reporting format
+
+After each phase, report back in this shape before moving on or declaring done:
+
+```
+Phase [N] — [PRP name]
+Files changed: [list]
+Test results: [X/Y E2E passing] [X/Y unit passing] [X/Y visual passing, if applicable]
+Failing tests (if any): [test ID + reason]
+Success metrics check: [pass/fail against the §10 table]
+Deviations from the PRP (if any) and why: [explicit list, or "none"]
+Ready for next phase: [yes/no]
+```
+
+Do not mark a phase complete if any listed test is failing — fix it first, and only report deviations you couldn't avoid, not ones you chose for convenience. You are to work on this first and make sure you create a `progress.md` such that another agent can continue where you left off.
+
+GitHub Copilot: Updated todo list
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering)
+
+Read [](file:///c%3A/Users/test/OneDrive/Documents/GitHub/iss-ai-engineering/PRPs/02-priority-system.md#1-1), lines 1 to 80
+
+Searched for files matching `**/package.json`, no matches
+
+Searched for files matching `**/app/page.tsx`, no matches
