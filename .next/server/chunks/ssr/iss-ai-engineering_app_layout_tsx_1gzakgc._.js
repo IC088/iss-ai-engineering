@@ -1,0 +1,3 @@
+module.exports=[49105,a=>{"use strict";var b=a.i(65180);a.s(["default",0,function({children:a}){return(0,b.jsx)("html",{lang:"en",children:(0,b.jsx)("body",{className:"min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100",children:a})})},"metadata",0,{title:"Todo App",description:"Singapore timezone-aware todo app"}])},26677,a=>{a.n(a.i(49105))}];
+
+//# sourceMappingURL=iss-ai-engineering_app_layout_tsx_1gzakgc._.js.map

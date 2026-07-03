@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
-import type { Todo, Priority, RecurrencePattern, Subtask } from '@/lib/db'
+import type { Todo, Priority, RecurrencePattern, Subtask, Tag, TodoWithTags } from '@/lib/db'
 import {
   getSingaporeNow,
   formatRelativeDueDate,
@@ -63,6 +63,499 @@ const PRIORITY_LABELS: Record<Priority, string> = {
 }
 
 // ---------------------------------------------------------------------------
+// PRP 06 — Tag System constants and utilities
+// ---------------------------------------------------------------------------
+const TAG_PRESET_COLORS = [
+  '#EF4444', '#F97316', '#F59E0B', '#84CC16', '#10B981',
+  '#06B6D4', '#3B82F6', '#8B5CF6', '#EC4899', '#6B7280',
+]
+
+/**
+ * Returns a readable text color (#111827 or #ffffff) for a given hex background.
+ * Computed via WCAG 2.1 relative luminance so it works for any valid hex color.
+ */
+function getContrastColor(hex: string): string {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  const toLinear = (c: number) => {
+    const s = c / 255
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4)
+  }
+  const L = 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b)
+  return L > 0.179 ? '#111827' : '#ffffff'
+}
+
+// ---------------------------------------------------------------------------
+// TagBadge — PRP 06 §5.1
+// ---------------------------------------------------------------------------
+interface TagBadgeProps {
+  tag: Tag
+  onRemove?: () => void
+  size?: 'sm' | 'md'
+  active?: boolean
+  onClick?: () => void
+}
+
+function TagBadge({ tag, onRemove, size = 'sm', active, onClick }: TagBadgeProps) {
+  const textColor = getContrastColor(tag.color)
+  const sizeClasses = size === 'sm' ? 'text-xs px-2 py-0.5' : 'text-sm px-2.5 py-1'
+  const interactiveClasses = onClick ? 'cursor-pointer hover:opacity-85 transition-opacity' : ''
+  const activeRing = active ? 'ring-2 ring-offset-1 ring-gray-400' : ''
+
+  return (
+    <span
+      className={`inline-flex items-center gap-0.5 rounded-full font-medium ${sizeClasses} ${interactiveClasses} ${activeRing}`}
+      style={{ backgroundColor: tag.color, color: textColor }}
+      title={tag.name.length > 20 ? tag.name : undefined}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      aria-pressed={active !== undefined ? active : undefined}
+    >
+      <span className="truncate max-w-[100px]">{tag.name}</span>
+      {onRemove && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onRemove() }}
+          aria-label={`Remove tag ${tag.name}`}
+          className="ml-0.5 leading-none hover:opacity-75 flex-shrink-0"
+        >
+          ×
+        </button>
+      )}
+    </span>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// TagPicker — PRP 06 §5.2
+// Searchable multi-select dropdown used in todo create/edit forms.
+// ---------------------------------------------------------------------------
+interface TagPickerProps {
+  selectedTags: Tag[]
+  onChange: (tags: Tag[]) => void
+  allTags: Tag[]
+  onCreateTag: (name: string, color: string) => Promise<Tag>
+}
+
+function TagPicker({ selectedTags, onChange, allTags, onCreateTag }: TagPickerProps) {
+  const [isOpen, setIsOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const [showColorPicker, setShowColorPicker] = useState(false)
+  const [pendingColor, setPendingColor] = useState(TAG_PRESET_COLORS[6])
+  const [isCreating, setIsCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const trimmed = search.trim()
+  const selectedIds = useMemo(() => new Set(selectedTags.map((t) => t.id)), [selectedTags])
+
+  const filtered = useMemo(
+    () =>
+      allTags.filter(
+        (t) =>
+          t.name.toLowerCase().includes(trimmed.toLowerCase()) && !selectedIds.has(t.id)
+      ),
+    [allTags, trimmed, selectedIds]
+  )
+
+  const exactMatch = useMemo(
+    () => allTags.find((t) => t.name.toLowerCase() === trimmed.toLowerCase()),
+    [allTags, trimmed]
+  )
+
+  const canCreate = trimmed.length > 0 && trimmed.length <= 30 && !exactMatch
+
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setIsOpen(false)
+        setShowColorPicker(false)
+        setSearch('')
+        setCreateError(null)
+      }
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [])
+
+  function selectTag(tag: Tag) {
+    onChange([...selectedTags, tag])
+    setSearch('')
+    setCreateError(null)
+  }
+
+  function removeTag(tag: Tag) {
+    onChange(selectedTags.filter((t) => t.id !== tag.id))
+  }
+
+  async function confirmCreate() {
+    if (!canCreate) return
+    setIsCreating(true)
+    setCreateError(null)
+    try {
+      const tag = await onCreateTag(trimmed, pendingColor)
+      onChange([...selectedTags, tag])
+      setSearch('')
+      setShowColorPicker(false)
+      setIsOpen(false)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to create tag'
+      if (msg.includes('already exists')) {
+        const existing = allTags.find((t) => t.name.toLowerCase() === trimmed.toLowerCase())
+        if (existing && !selectedIds.has(existing.id)) {
+          setCreateError(`"${existing.name}" already exists — click it to select.`)
+        } else {
+          setCreateError(msg)
+        }
+      } else {
+        setCreateError(msg)
+      }
+    } finally {
+      setIsCreating(false)
+    }
+  }
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div
+        className="flex flex-wrap gap-1 border rounded px-2 py-1.5 cursor-text min-h-[36px] dark:bg-gray-700 dark:border-gray-600 focus-within:ring-2 focus-within:ring-blue-500"
+        onClick={() => setIsOpen(true)}
+      >
+        {selectedTags.map((t) => (
+          <TagBadge key={t.id} tag={t} onRemove={() => removeTag(t)} />
+        ))}
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setIsOpen(true); setCreateError(null) }}
+          onFocus={() => setIsOpen(true)}
+          placeholder={selectedTags.length === 0 ? 'Add tags…' : ''}
+          maxLength={30}
+          aria-label="Tag search"
+          className="flex-1 min-w-[80px] bg-transparent text-xs outline-none"
+        />
+      </div>
+
+      {isOpen && (
+        <div className="absolute z-50 top-full left-0 mt-1 w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+          {filtered.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onMouseDown={(e) => { e.preventDefault(); selectTag(t) }}
+              className="flex items-center gap-2 w-full px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-left"
+            >
+              <span
+                className="w-3 h-3 rounded-full flex-shrink-0"
+                style={{ backgroundColor: t.color }}
+              />
+              {t.name}
+            </button>
+          ))}
+
+          {exactMatch && selectedIds.has(exactMatch.id) && (
+            <div className="px-3 py-2 text-xs text-gray-400 dark:text-gray-500">
+              &quot;{exactMatch.name}&quot; already added
+            </div>
+          )}
+
+          {exactMatch && !selectedIds.has(exactMatch.id) && (
+            <button
+              type="button"
+              onMouseDown={(e) => { e.preventDefault(); selectTag(exactMatch) }}
+              className="flex items-center gap-2 w-full px-3 py-2 text-sm hover:bg-gray-50 dark:hover:bg-gray-700 text-left"
+            >
+              <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: exactMatch.color }} />
+              {exactMatch.name}
+            </button>
+          )}
+
+          {canCreate && !showColorPicker && (
+            <button
+              type="button"
+              onMouseDown={(e) => { e.preventDefault(); setShowColorPicker(true) }}
+              className="flex items-center gap-2 w-full px-3 py-2 text-sm text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-left"
+            >
+              <span className="text-base leading-none">+</span>
+              Create &quot;{trimmed}&quot;
+            </button>
+          )}
+
+          {showColorPicker && canCreate && (
+            <div className="p-3 border-t border-gray-100 dark:border-gray-700">
+              <p className="text-xs text-gray-500 mb-2">Pick a color for &quot;{trimmed}&quot;</p>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {TAG_PRESET_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => setPendingColor(c)}
+                    className={`w-5 h-5 rounded-full transition-transform hover:scale-110 ${pendingColor === c ? 'ring-2 ring-offset-1 ring-gray-400' : ''}`}
+                    style={{ backgroundColor: c }}
+                    aria-label={`Color ${c}`}
+                  />
+                ))}
+              </div>
+              {createError && <p className="text-xs text-red-600 mb-2">{createError}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={confirmCreate}
+                  disabled={isCreating}
+                  className="flex-1 px-2 py-1 text-xs rounded bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50"
+                >
+                  {isCreating ? 'Creating…' : 'Create'}
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => { setShowColorPicker(false); setCreateError(null) }}
+                  className="px-2 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                >
+                  Back
+                </button>
+              </div>
+            </div>
+          )}
+
+          {filtered.length === 0 && !canCreate && !exactMatch && (
+            <div className="px-3 py-2 text-xs text-gray-400 dark:text-gray-500">
+              {trimmed ? 'No matching tags' : 'No tags yet — type to create one'}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// TagFilterBar — PRP 06 §5.4
+// ---------------------------------------------------------------------------
+interface TagFilterBarProps {
+  allTags: Tag[]
+  activeTagIds: number[]
+  onToggleTag: (id: number) => void
+  onClear: () => void
+}
+
+function TagFilterBar({ allTags, activeTagIds, onToggleTag, onClear }: TagFilterBarProps) {
+  if (allTags.length === 0) return null
+
+  return (
+    <div className="flex flex-wrap gap-1.5 items-center">
+      <span className="text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">Tags:</span>
+      {allTags.map((tag) => (
+        <TagBadge
+          key={tag.id}
+          tag={tag}
+          active={activeTagIds.includes(tag.id)}
+          onClick={() => onToggleTag(tag.id)}
+          size="sm"
+        />
+      ))}
+      {activeTagIds.length > 0 && (
+        <button
+          type="button"
+          onClick={onClear}
+          className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 underline ml-1"
+        >
+          Clear tags
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// TagManager — PRP 06 §5.3
+// Modal listing all tags with inline rename, recolor palette, and delete.
+// ---------------------------------------------------------------------------
+interface TagManagerProps {
+  tags: (Tag & { todo_count: number })[]
+  onRename: (id: number, name: string) => Promise<void>
+  onRecolor: (id: number, color: string) => Promise<void>
+  onDelete: (id: number) => Promise<void>
+  onClose: () => void
+}
+
+function TagManager({ tags, onRename, onRecolor, onDelete, onClose }: TagManagerProps) {
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editError, setEditError] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
+
+  const deletingTag = tags.find((t) => t.id === deletingId)
+
+  async function submitRename(id: number) {
+    const name = editName.trim()
+    if (!name) { setEditError('Name is required'); return }
+    if (name.length > 30) { setEditError('Max 30 characters'); return }
+    setIsSaving(true)
+    setEditError(null)
+    try {
+      await onRename(id, name)
+      setEditingId(null)
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Failed to rename')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="tag-manager-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    >
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6 max-h-[80vh] flex flex-col">
+        <div className="flex items-center justify-between mb-4">
+          <h2 id="tag-manager-title" className="text-lg font-semibold">Manage Tags</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close tag manager"
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xl leading-none"
+          >
+            ×
+          </button>
+        </div>
+
+        {tags.length === 0 ? (
+          <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+            No tags yet. Create tags by adding them to a todo.
+          </p>
+        ) : (
+          <ul className="space-y-2 overflow-y-auto flex-1">
+            {tags.map((tag) => (
+              <li
+                key={tag.id}
+                className="flex items-center gap-2 py-2 border-b border-gray-100 dark:border-gray-700 last:border-0"
+              >
+                {/* Color swatch + preset palette */}
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  {TAG_PRESET_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => onRecolor(tag.id, c)}
+                      className={`w-3.5 h-3.5 rounded-full transition-transform hover:scale-110 ${tag.color === c ? 'ring-1 ring-offset-1 ring-gray-400' : ''}`}
+                      style={{ backgroundColor: c }}
+                      aria-label={`Set color ${c} for ${tag.name}`}
+                    />
+                  ))}
+                </div>
+
+                {editingId === tag.id ? (
+                  <div className="flex-1 flex items-center gap-1">
+                    <input
+                      type="text"
+                      value={editName}
+                      onChange={(e) => { setEditName(e.target.value); setEditError(null) }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') submitRename(tag.id)
+                        if (e.key === 'Escape') setEditingId(null)
+                      }}
+                      maxLength={30}
+                      autoFocus
+                      aria-label={`Rename tag ${tag.name}`}
+                      className="flex-1 border rounded px-2 py-0.5 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => submitRename(tag.id)}
+                      disabled={isSaving}
+                      className="px-2 py-0.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setEditingId(null); setEditError(null) }}
+                      className="px-2 py-0.5 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                    >
+                      Cancel
+                    </button>
+                    {editError && <p className="text-xs text-red-600 ml-1">{editError}</p>}
+                  </div>
+                ) : (
+                  <>
+                    <span
+                      className="flex-1 text-sm truncate cursor-pointer hover:text-blue-600 dark:hover:text-blue-400"
+                      onClick={() => { setEditingId(tag.id); setEditName(tag.name); setEditError(null) }}
+                      title="Click to rename"
+                    >
+                      {tag.name}
+                    </span>
+                    <span className="text-xs text-gray-400 flex-shrink-0">
+                      {tag.todo_count} {tag.todo_count === 1 ? 'todo' : 'todos'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setDeletingId(tag.id)}
+                      aria-label={`Delete tag ${tag.name}`}
+                      className="text-xs text-gray-400 hover:text-red-600 transition-colors flex-shrink-0 px-1"
+                    >
+                      🗑
+                    </button>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {deletingTag && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="tag-delete-title"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+        >
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-sm w-full p-6">
+            <h3 id="tag-delete-title" className="text-base font-semibold mb-2">
+              Delete tag &quot;{deletingTag.name}&quot;?
+            </h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+              This will remove &quot;<strong>{deletingTag.name}</strong>&quot; from{' '}
+              <strong>{deletingTag.todo_count}</strong>{' '}
+              {deletingTag.todo_count === 1 ? 'todo' : 'todos'}. The todos themselves will not be
+              deleted.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => setDeletingId(null)}
+                className="px-4 py-2 text-sm rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  await onDelete(deletingTag.id)
+                  setDeletingId(null)
+                }}
+                className="px-4 py-2 text-sm rounded bg-red-600 hover:bg-red-700 text-white font-medium transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // PriorityBadge — PRP 02 §5.1
 // Renders text label + aria-label so color is never the only signal (WCAG 1.4.1)
 // ---------------------------------------------------------------------------
@@ -78,15 +571,26 @@ function PriorityBadge({ priority }: { priority: Priority }) {
 }
 
 // ---------------------------------------------------------------------------
-// useSectionedTodos — PRP 01 §5.2 + PRP 02 §5.4 (priority filter applied first)
+// useSectionedTodos — PRP 01 §5.2 + PRP 02 §5.4 (priority filter) + PRP 06 (tag filter)
 // ---------------------------------------------------------------------------
-function useSectionedTodos(todos: Todo[], priorityFilter: Priority | 'all') {
+function useSectionedTodos(
+  todos: TodoWithTags[],
+  priorityFilter: Priority | 'all',
+  activeTagIds: number[]
+) {
   return useMemo(() => {
     const now = getSingaporeNow()
 
-    // PRP 02: apply priority filter before sectioning
-    const filtered =
+    // PRP 02: apply priority filter
+    let filtered: TodoWithTags[] =
       priorityFilter === 'all' ? todos : todos.filter((t) => t.priority === priorityFilter)
+
+    // PRP 06: apply tag filter (OR logic across selected tag IDs, AND with priority)
+    if (activeTagIds.length > 0) {
+      filtered = filtered.filter((t) =>
+        t.tags.some((tag) => activeTagIds.includes(tag.id))
+      )
+    }
 
     // Overdue: incomplete, due_date in the past — sort by due_date ASC then priority DESC
     const overdue = filtered
@@ -114,7 +618,7 @@ function useSectionedTodos(todos: Todo[], priorityFilter: Priority | 'all') {
       .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
 
     return { overdue, active, completed }
-  }, [todos, priorityFilter])
+  }, [todos, priorityFilter, activeTagIds])
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +671,7 @@ function DeleteConfirmDialog({
   onConfirm,
   onCancel,
 }: {
-  todo: Todo
+  todo: TodoWithTags
   onConfirm: () => void
   onCancel: () => void
 }) {
@@ -215,11 +719,15 @@ function EditTodoModal({
   onClose,
   onUpdated,
   showError,
+  allTags,
+  onCreateTag,
 }: {
-  todo: Todo
+  todo: TodoWithTags
   onClose: () => void
-  onUpdated: (updated: Todo) => void
+  onUpdated: (updated: TodoWithTags) => void
   showError: (msg: string) => void
+  allTags: Tag[]
+  onCreateTag: (name: string, color: string) => Promise<Tag>
 }) {
   const [title, setTitle] = useState(todo.title)
   const [dueDate, setDueDate] = useState(
@@ -232,19 +740,20 @@ function EditTodoModal({
     todo.recurrence ?? 'weekly'
   )
   const [reminderMinutes, setReminderMinutes] = useState<number | null>(todo.reminder_minutes ?? null)
+  // PRP 06 — tag state
+  const [selectedTags, setSelectedTags] = useState<Tag[]>(todo.tags ?? [])
+  const originalTagIds = useRef(new Set(todo.tags?.map((t) => t.id) ?? []))
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   async function handleUpdate(e: React.FormEvent) {
     e.preventDefault()
     if (!title.trim()) return
 
-    // Capture pre-edit snapshot for rollback
-    const snapshot = { ...todo }
-
+    const snapshot = { ...todo, tags: todo.tags ?? [] }
     const nextRecurrence = isRecurring ? recurrencePattern : null
 
-    // Optimistic update
-    onUpdated({ ...todo, title: title.trim(), due_date: dueDate || null, priority, recurrence: nextRecurrence, reminder_minutes: reminderMinutes })
+    // Optimistic update with current tag selection
+    onUpdated({ ...todo, title: title.trim(), due_date: dueDate || null, priority, recurrence: nextRecurrence, reminder_minutes: reminderMinutes, tags: selectedTags })
     onClose()
     setIsSubmitting(true)
 
@@ -262,7 +771,25 @@ function EditTodoModal({
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error?.message ?? 'Failed to update todo')
-      onUpdated(json.data)
+
+      // Sync tag changes: attach new, detach removed
+      const newTagIds = new Set(selectedTags.map((t) => t.id))
+      const toAttach = selectedTags.filter((t) => !originalTagIds.current.has(t.id))
+      const toDetach = [...originalTagIds.current].filter((id) => !newTagIds.has(id))
+
+      if (toAttach.length > 0) {
+        await fetch(`/api/todos/${todo.id}/tags`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tagIds: toAttach.map((t) => t.id) }),
+        })
+      }
+      for (const tagId of toDetach) {
+        await fetch(`/api/todos/${todo.id}/tags/${tagId}`, { method: 'DELETE' })
+      }
+
+      // Server response doesn't include tags — preserve the selected tags from state
+      onUpdated({ ...json.data, tags: selectedTags })
     } catch (err) {
       onUpdated(snapshot) // rollback
       showError(err instanceof Error ? err.message : 'Failed to update todo')
@@ -278,7 +805,7 @@ function EditTodoModal({
       aria-labelledby="edit-modal-title"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
     >
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full p-6 overflow-y-auto max-h-[90vh]">
         <h2 id="edit-modal-title" className="text-lg font-semibold mb-4">
           Edit Todo
         </h2>
@@ -377,6 +904,16 @@ function EditTodoModal({
               <option value="low">Low</option>
             </select>
           </div>
+          {/* PRP 06 §5.2 — Tag picker */}
+          <div>
+            <label className="block text-sm font-medium mb-1">Tags</label>
+            <TagPicker
+              selectedTags={selectedTags}
+              onChange={setSelectedTags}
+              allTags={allTags}
+              onCreateTag={onCreateTag}
+            />
+          </div>
           <div className="flex gap-3 justify-end mt-2">
             <button
               type="button"
@@ -454,10 +991,10 @@ function TodoRow({
   onEdit,
   onDelete,
 }: {
-  todo: Todo
-  onToggle: (todo: Todo) => void
-  onEdit: (todo: Todo) => void
-  onDelete: (todo: Todo) => void
+  todo: TodoWithTags
+  onToggle: (todo: TodoWithTags) => void
+  onEdit: (todo: TodoWithTags) => void
+  onDelete: (todo: TodoWithTags) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const [subtasks, setSubtasks] = useState<Subtask[]>([])
@@ -566,6 +1103,14 @@ function TodoRow({
             🔔 {shortLabelFor(todo.reminder_minutes)}
           </span>
         )}
+        {/* PRP 06 §5.1 — tag badges (omitted when no tags) */}
+        {todo.tags.length > 0 && (
+          <div className="flex flex-wrap gap-1 flex-shrink-0 max-w-[200px]">
+            {todo.tags.map((tag) => (
+              <TagBadge key={tag.id} tag={tag} />
+            ))}
+          </div>
+        )}
         <span
           className={`flex-1 text-sm min-w-0 truncate ${todo.completed ? 'line-through text-gray-400' : ''}`}
           title={todo.title}
@@ -665,11 +1210,11 @@ function TodoSection({
   onDelete,
 }: {
   title: string
-  todos: Todo[]
+  todos: TodoWithTags[]
   sectionClass?: string
-  onToggle: (todo: Todo) => void
-  onEdit: (todo: Todo) => void
-  onDelete: (todo: Todo) => void
+  onToggle: (todo: TodoWithTags) => void
+  onEdit: (todo: TodoWithTags) => void
+  onDelete: (todo: TodoWithTags) => void
 }) {
   if (todos.length === 0) return null // Empty sections are hidden per PRP 01 §3.2
 
@@ -701,14 +1246,20 @@ function TodoSection({
 // ---------------------------------------------------------------------------
 export default function HomePage() {
   const router = useRouter()
-  const [todos, setTodos] = useState<Todo[]>([])
+  const [todos, setTodos] = useState<TodoWithTags[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [errorToast, setErrorToast] = useState<string | null>(null)
-  const [editingTodo, setEditingTodo] = useState<Todo | null>(null)
-  const [deletingTodo, setDeletingTodo] = useState<Todo | null>(null)
+  const [editingTodo, setEditingTodo] = useState<TodoWithTags | null>(null)
+  const [deletingTodo, setDeletingTodo] = useState<TodoWithTags | null>(null)
 
   // PRP 02 §5.4 — priority filter state
   const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all')
+
+  // PRP 06 — tag state
+  const [allTags, setAllTags] = useState<(Tag & { todo_count: number })[]>([])
+  const [activeTagIds, setActiveTagIds] = useState<number[]>([])
+  const [showTagManager, setShowTagManager] = useState(false)
+  const [newTags, setNewTags] = useState<Tag[]>([]) // tags selected in create form
 
   // Create form state
   const [newTitle, setNewTitle] = useState('')
@@ -735,10 +1286,19 @@ export default function HomePage() {
     }
   }, [])
 
-  // Fetch todos on mount
+  // Fetch todos and tags on mount
   useEffect(() => {
     fetchTodos()
+    fetchAllTags()
   }, [])
+
+  // Silently drop any active tag filter IDs that no longer exist
+  useEffect(() => {
+    if (activeTagIds.length === 0) return
+    const validIds = new Set(allTags.map((t) => t.id))
+    const filtered = activeTagIds.filter((id) => validIds.has(id))
+    if (filtered.length !== activeTagIds.length) setActiveTagIds(filtered)
+  }, [allTags])
 
   async function fetchTodos() {
     setIsLoading(true)
@@ -750,12 +1310,86 @@ export default function HomePage() {
       }
       const json = await res.json()
       if (!res.ok) throw new Error(json.error?.message ?? 'Failed to load todos')
-      setTodos(json.data)
+      setTodos(json.data as TodoWithTags[])
     } catch (err) {
       showError(err instanceof Error ? err.message : 'Failed to load todos')
     } finally {
       setIsLoading(false)
     }
+  }
+
+  async function fetchAllTags() {
+    try {
+      const res = await fetch('/api/tags')
+      if (!res.ok) return
+      const json = await res.json()
+      setAllTags(json.data ?? [])
+    } catch { /* non-fatal */ }
+  }
+
+  async function handleCreateTag(name: string, color: string): Promise<Tag> {
+    const res = await fetch('/api/tags', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, color }),
+    })
+    const json = await res.json()
+    if (!res.ok) throw new Error(json.error?.message ?? 'Failed to create tag')
+    const newTag = json.data as Tag
+    setAllTags((prev) =>
+      [...prev, { ...newTag, todo_count: 0 }].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+      )
+    )
+    return newTag
+  }
+
+  async function handleTagRename(id: number, name: string): Promise<void> {
+    const res = await fetch(`/api/tags/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    const json = await res.json()
+    if (!res.ok) throw new Error(json.error?.message ?? 'Failed to rename tag')
+    const updated = json.data as Tag
+    setAllTags((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)))
+    // Update tag name on all todos in state
+    setTodos((prev) =>
+      prev.map((todo) => ({
+        ...todo,
+        tags: todo.tags.map((t) => (t.id === id ? { ...t, ...updated } : t)),
+      }))
+    )
+  }
+
+  async function handleTagRecolor(id: number, color: string): Promise<void> {
+    const res = await fetch(`/api/tags/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ color }),
+    })
+    const json = await res.json()
+    if (!res.ok) throw new Error(json.error?.message ?? 'Failed to recolor tag')
+    const updated = json.data as Tag
+    setAllTags((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)))
+    setTodos((prev) =>
+      prev.map((todo) => ({
+        ...todo,
+        tags: todo.tags.map((t) => (t.id === id ? { ...t, ...updated } : t)),
+      }))
+    )
+  }
+
+  async function handleTagDelete(id: number): Promise<void> {
+    const res = await fetch(`/api/tags/${id}`, { method: 'DELETE' })
+    const json = await res.json()
+    if (!res.ok) throw new Error(json.error?.message ?? 'Failed to delete tag')
+    setAllTags((prev) => prev.filter((t) => t.id !== id))
+    // Remove deleted tag from all todos in state
+    setTodos((prev) =>
+      prev.map((todo) => ({ ...todo, tags: todo.tags.filter((t) => t.id !== id) }))
+    )
   }
 
   // PRP 01 §3.1 — create todo with optimistic update
@@ -770,7 +1404,8 @@ export default function HomePage() {
     setIsCreating(true)
 
     const tempId = -(++optimisticCounter.current) // negative to avoid collision with real IDs
-    const optimisticTodo: Todo = {
+    const tagsToAttach = [...newTags]
+    const optimisticTodo: TodoWithTags = {
       id: tempId,
       user_id: 0,
       title,
@@ -783,6 +1418,7 @@ export default function HomePage() {
       last_notification_sent: null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      tags: tagsToAttach,
     }
 
     setTodos((prev) => [...prev, optimisticTodo])
@@ -791,6 +1427,7 @@ export default function HomePage() {
     setNewPriority('medium')
     setNewRecurrence(null)
     setNewReminderMinutes(null)
+    setNewTags([])
 
     try {
       const res = await fetch('/api/todos', {
@@ -806,12 +1443,23 @@ export default function HomePage() {
       })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error?.message ?? 'Failed to create todo')
-      // Replace optimistic entry with canonical server record
-      setTodos((prev) => prev.map((t) => (t.id === tempId ? json.data : t)))
+      const createdTodo = json.data as TodoWithTags
+      // Attach tags if any were selected
+      if (tagsToAttach.length > 0) {
+        await fetch(`/api/todos/${createdTodo.id}/tags`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tagIds: tagsToAttach.map((t) => t.id) }),
+        })
+      }
+      // Replace optimistic entry; include tags from selection
+      setTodos((prev) =>
+        prev.map((t) => (t.id === tempId ? { ...createdTodo, tags: tagsToAttach } : t))
+      )
+      // Refresh tag counts
+      fetchAllTags()
     } catch (err) {
-      // Rollback: remove the optimistic todo
       setTodos((prev) => prev.filter((t) => t.id !== tempId))
-      // Restore form values
       setNewTitle(title)
       setNewPriority(newPriority)
       showError(err instanceof Error ? err.message : 'Failed to create todo')
@@ -821,9 +1469,9 @@ export default function HomePage() {
   }
 
   // PRP 01 §3.4 — toggle completion with optimistic update
-  async function handleToggle(todo: Todo) {
+  async function handleToggle(todo: TodoWithTags) {
     const newCompleted = todo.completed ? 0 : 1
-    const snapshot = { ...todo }
+    const snapshot = { ...todo, tags: todo.tags }
 
     setTodos((prev) =>
       prev.map((t) => (t.id === todo.id ? { ...t, completed: newCompleted } : t))
@@ -841,7 +1489,10 @@ export default function HomePage() {
         // Completing a recurring todo spawns a new instance — refetch to show it.
         await fetchTodos()
       } else {
-        setTodos((prev) => prev.map((t) => (t.id === todo.id ? json.data : t)))
+        // Preserve tags — PUT /api/todos/[id] doesn’t return tags
+        setTodos((prev) =>
+          prev.map((t) => (t.id === todo.id ? { ...json.data, tags: todo.tags } : t))
+        )
       }
     } catch (err) {
       setTodos((prev) => prev.map((t) => (t.id === todo.id ? snapshot : t))) // rollback
@@ -850,7 +1501,7 @@ export default function HomePage() {
   }
 
   // PRP 01 §3.3 — edit modal: onUpdated is called both for optimistic update and server response
-  function handleUpdated(updated: Todo) {
+  function handleUpdated(updated: TodoWithTags) {
     setTodos((prev) => prev.map((t) => (t.id === updated.id ? updated : t)))
   }
 
@@ -873,8 +1524,8 @@ export default function HomePage() {
     }
   }
 
-  // PRP 02 §3.3 — sectioned list with priority filter applied
-  const { overdue, active, completed } = useSectionedTodos(todos, priorityFilter)
+  // PRP 02 §3.3 + PRP 06 — sectioned list with priority and tag filters applied
+  const { overdue, active, completed } = useSectionedTodos(todos, priorityFilter, activeTagIds)
 
   async function handleLogout() {
     await fetch('/api/auth/logout', { method: 'POST' })
@@ -906,6 +1557,14 @@ export default function HomePage() {
             className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
           >
             Logout
+          </button>
+          {/* PRP 06 — Manage Tags button */}
+          <button
+            type="button"
+            onClick={() => setShowTagManager(true)}
+            className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          >
+            Manage Tags
           </button>
         </div>
       </div>
@@ -1011,6 +1670,16 @@ export default function HomePage() {
             ))}
           </select>
         </div>
+        {/* PRP 06 §5.2 — Tag picker for create form */}
+        <div>
+          <label className="block text-sm mb-1">Tags</label>
+          <TagPicker
+            selectedTags={newTags}
+            onChange={setNewTags}
+            allTags={allTags}
+            onCreateTag={handleCreateTag}
+          />
+        </div>
         {createError && (
           <p role="alert" className="text-red-600 text-xs">
             {createError}
@@ -1018,23 +1687,36 @@ export default function HomePage() {
         )}
       </form>
 
-      {/* Filter bar — PRP 02 §5.4 */}
-      <div className="flex gap-3 mb-4 items-center">
-        <label htmlFor="priority-filter" className="sr-only">
-          Filter by priority
-        </label>
-        <select
-          id="priority-filter"
-          value={priorityFilter}
-          onChange={(e) => setPriorityFilter(e.target.value as Priority | 'all')}
-          aria-label="Filter by priority"
-          className="border rounded px-3 py-1.5 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
-        >
-          <option value="all">All Priorities</option>
-          <option value="high">High</option>
-          <option value="medium">Medium</option>
-          <option value="low">Low</option>
-        </select>
+      {/* Filter bar — PRP 02 §5.4 + PRP 06 §5.4 */}
+      <div className="flex flex-col gap-2 mb-4">
+        <div className="flex gap-3 items-center">
+          <label htmlFor="priority-filter" className="sr-only">
+            Filter by priority
+          </label>
+          <select
+            id="priority-filter"
+            value={priorityFilter}
+            onChange={(e) => setPriorityFilter(e.target.value as Priority | 'all')}
+            aria-label="Filter by priority"
+            className="border rounded px-3 py-1.5 text-sm dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="all">All Priorities</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+        {/* PRP 06 §5.4 — Tag filter chips */}
+        <TagFilterBar
+          allTags={allTags}
+          activeTagIds={activeTagIds}
+          onToggleTag={(id) =>
+            setActiveTagIds((prev) =>
+              prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+            )
+          }
+          onClear={() => setActiveTagIds([])}
+        />
       </div>
 
       {/* Todo sections */}
@@ -1070,19 +1752,25 @@ export default function HomePage() {
           {/* Empty state */}
           {overdue.length === 0 && active.length === 0 && completed.length === 0 && (
             <p className="text-center text-gray-400 py-12">
-              {priorityFilter === 'all' ? 'No todos yet. Add one above!' : `No ${priorityFilter} priority todos.`}
+              {activeTagIds.length > 0
+                ? 'No todos match the selected tags.'
+                : priorityFilter === 'all'
+                ? 'No todos yet. Add one above!'
+                : `No ${priorityFilter} priority todos.`}
             </p>
           )}
         </div>
       )}
 
-      {/* Edit modal — PRP 01 §5.4 + PRP 02 §5.3 */}
+      {/* Edit modal — PRP 01 §5.4 + PRP 02 §5.3 + PRP 06 */}
       {editingTodo && (
         <EditTodoModal
           todo={editingTodo}
           onClose={() => setEditingTodo(null)}
           onUpdated={handleUpdated}
           showError={showError}
+          allTags={allTags}
+          onCreateTag={handleCreateTag}
         />
       )}
 
@@ -1092,6 +1780,17 @@ export default function HomePage() {
           todo={deletingTodo}
           onConfirm={handleDeleteConfirm}
           onCancel={() => setDeletingTodo(null)}
+        />
+      )}
+
+      {/* Tag Manager — PRP 06 §5.3 */}
+      {showTagManager && (
+        <TagManager
+          tags={allTags}
+          onRename={handleTagRename}
+          onRecolor={handleTagRecolor}
+          onDelete={handleTagDelete}
+          onClose={() => setShowTagManager(false)}
         />
       )}
 

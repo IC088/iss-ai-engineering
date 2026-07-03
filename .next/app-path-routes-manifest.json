@@ -1,0 +1,17 @@
+{
+  "/_global-error/page": "/_global-error",
+  "/_not-found/page": "/_not-found",
+  "/api/auth/dev-login/route": "/api/auth/dev-login",
+  "/api/auth/logout/route": "/api/auth/logout",
+  "/api/notifications/check/route": "/api/notifications/check",
+  "/api/subtasks/[id]/route": "/api/subtasks/[id]",
+  "/api/tags/[id]/route": "/api/tags/[id]",
+  "/api/tags/route": "/api/tags",
+  "/api/todos/[id]/route": "/api/todos/[id]",
+  "/api/todos/[id]/subtasks/route": "/api/todos/[id]/subtasks",
+  "/api/todos/[id]/tags/[tagId]/route": "/api/todos/[id]/tags/[tagId]",
+  "/api/todos/[id]/tags/route": "/api/todos/[id]/tags",
+  "/api/todos/route": "/api/todos",
+  "/login/page": "/login",
+  "/page": "/"
+}

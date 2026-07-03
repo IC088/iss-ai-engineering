@@ -5,8 +5,8 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
-import { getDb, validatePriority, PRIORITY_VALUES } from '@/lib/db'
-import type { Todo } from '@/lib/db'
+import { getDb, validatePriority, PRIORITY_VALUES, tagDB } from '@/lib/db'
+import type { Todo, TodoWithTags } from '@/lib/db'
 import { parseDueDateToUtc, isDueDateValid } from '@/lib/timezone'
 
 const MAX_BODY_BYTES = 64 * 1024 // 64 KB
@@ -283,21 +283,69 @@ export async function GET(request: NextRequest) {
     priorityFilter = priorityParam
   }
 
+  // PRP 06: validate optional ?tags= query parameter (comma-separated tag IDs, OR filter)
+  const tagsParam = url.searchParams.get('tags')
+  let tagIds: number[] | null = null
+  if (tagsParam !== null && tagsParam.trim() !== '') {
+    const parts = tagsParam.split(',')
+    const parsed = parts.map((p) => parseInt(p.trim(), 10))
+    if (parsed.some((n) => isNaN(n) || n <= 0)) {
+      return NextResponse.json(
+        { error: { code: 'INVALID_TAG_IDS', message: 'tags must be comma-separated positive integers' } },
+        { status: 400 }
+      )
+    }
+    tagIds = parsed
+  }
+
   try {
     const db = getDb()
-    // Priority column name is hardcoded — never interpolated from user input
-    // Priority filter value is bound as a parameter
-    const stmt = priorityFilter
-      ? db.prepare(
-          'SELECT * FROM todos WHERE user_id = ? AND priority = ? ORDER BY created_at DESC'
-        )
-      : db.prepare('SELECT * FROM todos WHERE user_id = ? ORDER BY created_at DESC')
 
-    const todos = priorityFilter
-      ? (stmt.all(session.userId, priorityFilter) as Todo[])
-      : (stmt.all(session.userId) as Todo[])
+    // Build the base query, applying priority and tag filters as needed.
+    // Tag IDs are always bound as parameters — never interpolated from user input.
+    let todos: Todo[]
 
-    return NextResponse.json({ data: todos })
+    if (tagIds !== null && tagIds.length > 0) {
+      // Tag filter: use DISTINCT JOIN on todo_tags (OR logic across the given tagIds).
+      // Priority filter is ANDed on top when present.
+      const ph = tagIds.map(() => '?').join(',')
+      const stmt = priorityFilter
+        ? db.prepare(
+            `SELECT DISTINCT t.* FROM todos t
+             JOIN todo_tags tt ON tt.todo_id = t.id
+             WHERE t.user_id = ? AND t.priority = ? AND tt.tag_id IN (${ph})
+             ORDER BY t.created_at DESC`
+          )
+        : db.prepare(
+            `SELECT DISTINCT t.* FROM todos t
+             JOIN todo_tags tt ON tt.todo_id = t.id
+             WHERE t.user_id = ? AND tt.tag_id IN (${ph})
+             ORDER BY t.created_at DESC`
+          )
+
+      todos = priorityFilter
+        ? (stmt.all(session.userId, priorityFilter, ...tagIds) as Todo[])
+        : (stmt.all(session.userId, ...tagIds) as Todo[])
+    } else {
+      const stmt = priorityFilter
+        ? db.prepare(
+            'SELECT * FROM todos WHERE user_id = ? AND priority = ? ORDER BY created_at DESC'
+          )
+        : db.prepare('SELECT * FROM todos WHERE user_id = ? ORDER BY created_at DESC')
+
+      todos = priorityFilter
+        ? (stmt.all(session.userId, priorityFilter) as Todo[])
+        : (stmt.all(session.userId) as Todo[])
+    }
+
+    // Batch-fetch tags to avoid N+1 queries (PRP 06 §4.4)
+    const tagMap = tagDB.getTagsForTodos(todos.map((t) => t.id))
+    const todosWithTags: TodoWithTags[] = todos.map((t) => ({
+      ...t,
+      tags: tagMap.get(t.id) ?? [],
+    }))
+
+    return NextResponse.json({ data: todosWithTags })
   } catch (err) {
     console.error('GET /api/todos error:', {
       endpoint: 'GET /api/todos',
