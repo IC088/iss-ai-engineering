@@ -273,8 +273,3 @@ The following are explicitly **not** part of this PRP:
 | Ownership isolation | TC-S07 returns 404 for cross-user access |
 | Idempotent schema | Running DB init twice creates no duplicate table and no data change |
 
----
-
-## 10. GitHub Copilot Prompt
-
-> **First read `lib/db.ts` and `app/page.tsx`** to see what's already built (PRP 01/02 and features 03–04 are in place) — I'm adding onto that work, not starting fresh. Then implement Subtasks & Progress per #file:PRPs/05-subtasks-progress.md and `.github/copilot-instructions.md`, **additively**: create the `subtasks` table with `ON DELETE CASCADE` via `CREATE TABLE IF NOT EXISTS` (ensure `PRAGMA foreign_keys = ON`), add `subtaskDB` CRUD (prepared statements) to `lib/db.ts`, build the three API routes (`POST /api/todos/[id]/subtasks`, `PUT` & `DELETE /api/subtasks/[id]` — async `params`, ownership-checked), add the pure `progress()` helper, and wire the expandable checklist + real-time progress bar (green at 100%, else blue) into `app/page.tsx`. **Do not rewrite, reformat, or delete any existing schema, routes, or UI.** Code only, no explanation, skip tests — I'll verify manually.

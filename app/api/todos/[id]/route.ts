@@ -7,8 +7,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
 import { getDb, validatePriority } from '@/lib/db'
-import type { Todo } from '@/lib/db'
-import { parseDueDateToUtc, isDueDateValid } from '@/lib/timezone'
+import type { Todo, RecurrencePattern } from '@/lib/db'
+import { parseDueDateToUtc, isDueDateValid, nextDueDate } from '@/lib/timezone'
 
 const MAX_BODY_BYTES = 64 * 1024 // 64 KB
 
@@ -315,18 +315,20 @@ export async function PUT(request: NextRequest, { params }: RouteContext) {
   try {
     const db = getDb()
 
+    // Load existing todo upfront for ownership check and recurring completion logic.
+    const existing = db
+      .prepare('SELECT * FROM todos WHERE id = ? AND user_id = ?')
+      .get(numericId, session.userId) as Todo | undefined
+
+    if (!existing) {
+      return NextResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'Todo not found' } },
+        { status: 404 }
+      )
+    }
+
     if (Object.keys(updates).length === 0) {
-      // Nothing to update — return current state or 404
-      const todo = db
-        .prepare('SELECT * FROM todos WHERE id = ? AND user_id = ?')
-        .get(numericId, session.userId) as Todo | undefined
-      if (!todo) {
-        return NextResponse.json(
-          { error: { code: 'NOT_FOUND', message: 'Todo not found' } },
-          { status: 404 }
-        )
-      }
-      return NextResponse.json({ data: todo })
+      return NextResponse.json({ data: existing })
     }
 
     // Build SET clause from the validated updates object only —
@@ -336,15 +338,40 @@ export async function PUT(request: NextRequest, { params }: RouteContext) {
       .join(', ')
     const values = Object.values(updates)
 
-    const result = db
+    db
       .prepare(`UPDATE todos SET ${setClauses} WHERE id = ? AND user_id = ?`)
       .run(...values, numericId, session.userId)
 
-    if (result.changes === 0) {
-      return NextResponse.json(
-        { error: { code: 'NOT_FOUND', message: 'Todo not found' } },
-        { status: 404 }
+    // PRP 03 — spawn the next instance when a recurring todo is completed.
+    // Guards: must be a completion (not un-completion), todo must have been active,
+    // recurrence and due_date must be set.
+    if (
+      updates.completed === 1 &&
+      existing.completed !== 1 &&
+      existing.recurrence !== null &&
+      existing.recurrence !== undefined &&
+      existing.due_date !== null &&
+      existing.due_date !== undefined
+    ) {
+      const next = nextDueDate(
+        new Date(existing.due_date),
+        existing.recurrence as RecurrencePattern
       )
+      db
+        .prepare(
+          `INSERT INTO todos
+             (user_id, title, description, due_date, priority, recurrence, reminder_minutes, last_notification_sent)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`
+        )
+        .run(
+          session.userId,
+          existing.title,
+          existing.description,
+          next.toISOString(),
+          existing.priority,
+          existing.recurrence,
+          existing.reminder_minutes ?? null
+        )
     }
 
     const updated = db

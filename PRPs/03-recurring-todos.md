@@ -332,8 +332,3 @@ The following are explicitly **not** part of this PRP:
 | Zero `RecurrencePattern` redeclarations | Confirmed by grep outside `lib/db.ts` |
 | Idempotent migration | Running DB init twice adds no duplicate column and no data change |
 
----
-
-## 10. GitHub Copilot Prompt
-
-> **First read `PROGRESS.md` — my teammate's handoff summary of what's already built — then skim `lib/db.ts` and `app/page.tsx` to confirm the actual schema/UI state** (code is ground truth if it differs from the doc). I'm adding onto their work, not starting fresh. Then implement Recurring Todos per #file:PRPs/03-recurring-todos.md and `.github/copilot-instructions.md`, **additively**: add `is_recurring` + `recurrence_pattern` via idempotent `ALTER TABLE` guards, add `nextDueDate()` to `lib/timezone.ts` (month/leap clamping), wire next-instance creation into the *existing* PUT `/api/todos/[id]` completion path (inherit priority, tags, reminder; set child `last_notification_sent = NULL`; do not copy subtasks), and add the Repeat checkbox + pattern select + 🔄 badge into `app/page.tsx`. **Do not rewrite, reformat, or delete any existing schema, routes, or UI.** Code only, no explanation, skip tests — I'll verify manually.

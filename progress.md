@@ -1,7 +1,7 @@
 # Implementation Progress
 
 **Date**: 2026-07-03  
-**Status**: Phase 1 (PRP 01) ✅ COMPLETE | Phase 2 (PRP 02) ✅ COMPLETE
+**Status**: Phase 1 (PRP 01) ✅ COMPLETE | Phase 2 (PRP 02) ✅ COMPLETE | Phase 3 (PRP 03) ✅ COMPLETE | Phase 4 (PRP 04) ✅ COMPLETE | Phase 5 (PRP 05) ✅ COMPLETE
 
 ---
 
@@ -53,6 +53,48 @@ Implemented as part of Phase 1 (columns, `PRIORITY_ORDER`, `PRIORITY_VALUES`, `v
 
 ---
 
+### Phase 3 — PRP 03: Recurring Todos
+
+**Files created/modified:**
+- `lib/db.ts` — `RecurrencePattern` type, `RECURRENCE_VALUES`, idempotent `ALTER TABLE` for `last_notification_sent`; existing `recurrence TEXT` column used as combined is_recurring + pattern (ground truth: routes use single column)
+- `lib/auth.ts` — JWT session (`getSession`, `createSessionToken`, `SESSION_COOKIE_OPTIONS`) — was missing from repo
+- `lib/timezone.ts` — `nextDueDate()` with `addMonthsClamped()` (Jan 31→Feb 28/29, Feb 29→Feb 28 clamping)
+- `next.config.ts` — `serverExternalPackages: ['better-sqlite3']` — was missing from repo
+- `app/api/todos/[id]/route.ts` — PUT completion path: detects `recurrence !== null`, inserts next instance inheriting title/priority/recurrence/reminder, resets `last_notification_sent = NULL`, does not copy subtasks
+- `app/page.tsx` — `RecurrencePattern` import, `capitalize()` helper, `newRecurrence` state, Repeat checkbox + pattern select in create form, same in `EditTodoModal`, 🔄 badge in `TodoRow`, refetch on recurring completion to surface new instance
+
+**Deviations from PRP:**
+- PRP specifies two columns (`is_recurring INTEGER`, `recurrence_pattern TEXT`). Existing routes use a single `recurrence TEXT` column (null = not recurring, value = pattern). Followed code as ground truth per PRP §10 instruction.
+
+**Tests:** skipped per PRP §10 ("skip tests — I'll verify manually")
+
+---
+
+### Phase 4 — PRP 04: Reminders & Notifications
+
+**Files created/modified:**
+- `lib/db.ts` — `REMINDER_OPTIONS` (7 entries), `REMINDER_MINUTES_VALUES`, idempotent `ALTER TABLE` for `reminder_minutes`
+- `lib/timezone.ts` — `reminderTriggerTime()`, `isDueForNotification()` (pure, unit-testable)
+- `lib/hooks/useNotifications.ts` — `useNotifications(enabled)` hook: SSR-guarded, 30s polling, fires once on mount, cleans up on unmount, no-ops without `Notification.permission === 'granted'`
+- `app/api/notifications/check/route.ts` — auth-guarded GET; queries incomplete todos with due_date + reminder_minutes, filters with `isDueForNotification`, stamps `last_notification_sent` in a transaction, returns matched todos
+- `app/page.tsx` — `REMINDER_OPTIONS` inline constant, `shortLabelFor()` helper, `useNotifications` hook wired with `perm` state (initialised from `Notification.permission` on mount), Enable Notifications button in header, reminder `<select>` in create form + `EditTodoModal` (disabled without due date, clears on date clear), 🔔 badge in `TodoRow`, `newReminderMinutes` state, `reminder_minutes` in optimistic todo + POST/PUT bodies
+
+**Tests:** skipped per PRP §10 ("skip tests — I'll verify manually")
+
+---
+
+### Phase 5 — PRP 05: Subtasks & Progress
+
+**Files created/modified:**
+- `lib/db.ts` — `Subtask` interface, `subtaskDB` CRUD object (`create`, `listByTodo`, `toggle`, `updateTitle`, `delete`, `ownerUserId` — all prepared statements), `progress()` pure function, `CREATE INDEX IF NOT EXISTS idx_subtasks_todo ON subtasks(todo_id)`
+- `app/api/todos/[id]/subtasks/route.ts` — `GET` (list ordered by position ASC, ownership-checked) + `POST` (title validated, position = `COALESCE(MAX,0)+1`, returns 201)
+- `app/api/subtasks/[id]/route.ts` — `PUT` (toggle `completed`, optional `updateTitle`, ownership via JOIN to todos) + `DELETE` (ownership-checked, returns `{ok:true}`)
+- `app/page.tsx` — `Subtask` import, inline `progress()`, `SubtaskInput` component (Enter/Add submit, clears on success), `TodoRow` refactored to stateful with `expanded`/`subtasks` state; lazy-loads subtasks on first expand; optimistic add/toggle/delete with rollback; progress bar (blue → green at 100%) with `X/Y completed (Z%)` label; ▸/▾ toggle button in hover action group
+
+**Tests:** skipped per PRP §10 ("skip tests — I'll verify manually")
+
+---
+
 ## Deviations from PRPs
 
 ### 1. Dev-auth instead of WebAuthn (intentional)
@@ -81,34 +123,15 @@ Playwright's top-level `request` fixture is an isolated context without the sess
 
 ## Next Steps (remaining PRPs)
 
-### PRP 03 — Recurring Todos
-- `recurrence` and `reminder_minutes` columns already in schema
-- Need: recurrence-completion logic in `PUT /api/todos/[id]`
-- Need: `RecurrencePattern` type already exported from `lib/db.ts`
-
-### PRP 04 — Reminders & Notifications
-- `reminder_minutes` column already in schema
-- Need: `app/api/notifications/check/route.ts`
-- Need: `lib/hooks/useNotifications.ts`
-- Need: polling logic in `app/page.tsx`
-
-### PRP 05 — Subtasks & Progress
-- `subtasks` table already in schema (with CASCADE)
-- Need: subtask CRUD API routes, progress bar UI
-
 ### PRP 06 — Tag System
 - `tags` and `todo_tags` tables already in schema
-- Need: tag CRUD API, tag filtering
+- Need: tag CRUD API, tag filtering UI, tag badges on todo rows
 
 ### PRP 07 — Template System
 ### PRP 08 — Search & Filtering  
 ### PRP 09 — Export & Import
 ### PRP 10 — Calendar View
 ### PRP 11 — WebAuthn Authentication
-- Replace `app/api/auth/dev-login/route.ts` with WebAuthn registration/verification
-- Update `tests/helpers.ts` `authenticate()` to use virtual WebAuthn authenticator
-- Add `@simplewebauthn/server` and `@simplewebauthn/browser` dependencies
-- Add `authenticators` table to `lib/db.ts`
 
 ---
 
@@ -128,7 +151,10 @@ Playwright's top-level `request` fixture is an isolated context without the sess
 ### Client component pattern
 - `app/page.tsx` is `'use client'` — imports from `lib/db.ts` use `import type` only
 - All data flows through API routes; never call DB directly from client components
-- `PRIORITY_ORDER` is duplicated in `app/page.tsx` (see Deviations §3)
+- `PRIORITY_ORDER`, `REMINDER_OPTIONS`, `progress()` are inlined in `app/page.tsx` for client bundle compatibility (see Deviations §3)
+
+### Hooks pattern
+- `lib/hooks/useNotifications.ts` — SSR-guarded with `typeof window` checks; safe for Next.js App Router
 
 ### Test pattern
 - All authenticated E2E calls use `page.request` (shares browser cookie jar)

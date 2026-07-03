@@ -291,8 +291,3 @@ The following are explicitly **not** part of this PRP:
 | Graceful denial | App has zero console errors with permission denied |
 | Idempotent migration | Running DB init twice adds no duplicate column and no data change |
 
----
-
-## 10. GitHub Copilot Prompt
-
-> **First read `lib/db.ts`, `app/page.tsx`, and the existing `app/api` routes** to see what's already built (03 recurring and PRP 01/02 are in place) — I'm adding onto that work, not starting fresh. Then implement Reminders & Notifications per #file:PRPs/04-reminders-notifications.md and `.github/copilot-instructions.md`, **additively**: add `reminder_minutes` + `last_notification_sent` via idempotent `ALTER TABLE`, build `GET /api/notifications/check` (Singapore-timezone windowing, `last_notification_sent` de-dup stamping), create `lib/hooks/useNotifications.ts` (30s polling, permission request, SSR-guarded), and add the Enable-Notifications button + 7-option reminder select (disabled without due date) + 🔔 badge into `app/page.tsx`. **Do not rewrite, reformat, or delete any existing schema, routes, or UI.** Code only, no explanation, skip tests — I'll verify manually.
